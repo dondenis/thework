@@ -39,9 +39,9 @@ def action_ids(df: pd.DataFrame) -> np.ndarray:
 def build_transitions(
     df: pd.DataFrame, state_features: list[str]
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    states = df[state_features].to_numpy(dtype=np.float32)
+    states = df[state_features].fillna(0).to_numpy(dtype=np.float32)
     actions = action_ids(df).astype(np.int32)
-    rewards = df["reward"].to_numpy(dtype=np.float32)
+    rewards = df["reward"].fillna(0).to_numpy(dtype=np.float32)
     next_states = np.zeros_like(states)
     dones = np.zeros(len(df), dtype=np.float32)
 
@@ -54,6 +54,7 @@ def build_transitions(
             next_states[idx] = 0.0
             dones[idx] = 1.0
 
+    next_states = np.nan_to_num(next_states, nan=0.0, posinf=0.0, neginf=0.0)
     return states, actions, rewards, next_states, dones
 
 
@@ -62,11 +63,11 @@ class DuelingQNetwork(tf.keras.Model):
         super().__init__()
         self.fc1 = tf.keras.layers.Dense(128, use_bias=False)
         self.bn1 = tf.keras.layers.BatchNormalization(center=True, scale=True)
-        self.act1 = tf.keras.layers.LeakyReLU(alpha=0.01)
+        self.act1 = tf.keras.layers.LeakyReLU(negative_slope=0.01)
 
         self.fc2 = tf.keras.layers.Dense(128, use_bias=False)
         self.bn2 = tf.keras.layers.BatchNormalization(center=True, scale=True)
-        self.act2 = tf.keras.layers.LeakyReLU(alpha=0.01)
+        self.act2 = tf.keras.layers.LeakyReLU(negative_slope=0.01)
 
         kinit = tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.05)
         self.adv_head = tf.keras.layers.Dense(num_actions, kernel_initializer=kinit)
@@ -116,6 +117,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tau", type=float, default=DEFAULT_TAU)
     parser.add_argument("--lr", type=float, default=DEFAULT_LR)
     parser.add_argument("--cql-alpha", type=float, default=DEFAULT_CQL_ALPHA)
+    parser.add_argument("--debug-every", type=int, default=1000)
     return parser.parse_args()
 
 
@@ -132,6 +134,16 @@ def main() -> None:
     states, actions, rewards, next_states, dones = build_transitions(
         train_df, state_features
     )
+    nan_features = np.isnan(states).sum()
+    nan_rewards = np.isnan(rewards).sum()
+    nan_next = np.isnan(next_states).sum()
+    if nan_features > 0 or nan_rewards > 0 or nan_next > 0:
+        print(
+            f"[debug] NaNs in states: {nan_features}, rewards: {nan_rewards}, next_states: {nan_next}"
+        )
+        states = np.nan_to_num(states, nan=0.0, posinf=0.0, neginf=0.0)
+        rewards = np.nan_to_num(rewards, nan=0.0, posinf=0.0, neginf=0.0)
+        next_states = np.nan_to_num(next_states, nan=0.0, posinf=0.0, neginf=0.0)
 
     main_model = DuelingQNetwork(states.shape[1], NUM_ACTIONS)
     target_model = DuelingQNetwork(states.shape[1], NUM_ACTIONS)
@@ -190,8 +202,21 @@ def main() -> None:
         )
         soft_update(target_model, main_model, args.tau)
 
-        if step % 1000 == 0:
-            print(f"Step {step}: loss={loss.numpy():.6f}")
+        if step % args.debug_every == 0:
+            q_now = main_model(batch_states, training=False)
+            q_min = float(tf.reduce_min(q_now).numpy())
+            q_max = float(tf.reduce_max(q_now).numpy())
+            rewards_min = float(tf.reduce_min(batch_rewards).numpy())
+            rewards_max = float(tf.reduce_max(batch_rewards).numpy())
+            loss_val = float(loss.numpy())
+            print(
+                f"Step {step}: loss={loss_val:.6f} "
+                f"q_range=({q_min:.3f},{q_max:.3f}) "
+                f"reward_range=({rewards_min:.3f},{rewards_max:.3f})"
+            )
+            if np.isnan(loss_val):
+                print("[debug] Loss is NaN. Stopping for inspection.")
+                break
 
     model_path = args.output_dir / "model.weights.h5"
     main_model.save_weights(model_path)
