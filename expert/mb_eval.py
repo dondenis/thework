@@ -6,7 +6,7 @@ import csv
 import json
 from pathlib import Path
 import sys
-from typing import Tuple
+from typing import Tuple, Dict, Any
 
 import numpy as np
 import pandas as pd
@@ -67,6 +67,34 @@ def action_ids(df: pd.DataFrame) -> np.ndarray:
     vaso = df["vaso_input"].fillna(0).astype(int)
     return (iv * 5 + vaso).to_numpy()
 
+
+def sofa_bins(sofa_values: np.ndarray) -> np.ndarray:
+    sofa = sofa_values.astype(float)
+    if sofa.max() <= 1.0:
+        sofa = sofa * 24.0
+    bins = np.empty(len(sofa), dtype=object)
+    bins[sofa < 5] = "low"
+    bins[(sofa >= 5) & (sofa <= 15)] = "medium"
+    bins[sofa > 15] = "high"
+    return bins
+
+
+def physician_action_counts(df: pd.DataFrame) -> Dict[str, Any]:
+    actions = action_ids(df)
+    counts = np.bincount(actions, minlength=NUM_ACTIONS)[1:]
+    bins = sofa_bins(df["SOFA"].to_numpy())
+    by_sofa = {}
+    for label, key in [("low", "low"), ("medium", "mid"), ("high", "high")]:
+        mask = bins == label
+        if not np.any(mask):
+            by_sofa[key] = [0] * (NUM_ACTIONS - 1)
+        else:
+            bin_counts = np.bincount(actions[mask], minlength=NUM_ACTIONS)[1:]
+            by_sofa[key] = bin_counts.astype(int).tolist()
+    return {
+        "physician_action_counts_24": counts.astype(int).tolist(),
+        "physician_action_counts_24_by_sofa": by_sofa,
+    }
 
 def one_hot_actions(actions: np.ndarray) -> np.ndarray:
     return np.eye(NUM_ACTIONS, dtype=np.float32)[actions]
@@ -192,6 +220,7 @@ def main() -> None:
         "phwdr": phwdr,
         "am": am,
     }
+    metrics.update(physician_action_counts(test_df))
 
     metrics_path = args.output_dir / "mb_eval_metrics.json"
     metrics_path.write_text(json.dumps(metrics, indent=2))

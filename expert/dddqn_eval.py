@@ -5,7 +5,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Any
 
 import numpy as np
 import pandas as pd
@@ -79,6 +79,30 @@ def sofa_bins(sofa_values: np.ndarray) -> np.ndarray:
     bins[(sofa >= 5) & (sofa <= 15)] = "medium"
     bins[sofa > 15] = "high"
     return bins
+
+
+def action_ids(df: pd.DataFrame) -> np.ndarray:
+    iv = df["iv_input"].fillna(0).astype(int)
+    vaso = df["vaso_input"].fillna(0).astype(int)
+    return (iv * 5 + vaso).to_numpy()
+
+
+def physician_action_counts(df: pd.DataFrame) -> Dict[str, Any]:
+    actions = action_ids(df)
+    counts = np.bincount(actions, minlength=NUM_ACTIONS)[1:]
+    bins = sofa_bins(df["SOFA"].to_numpy())
+    by_sofa = {}
+    for label, key in [("low", "low"), ("medium", "mid"), ("high", "high")]:
+        mask = bins == label
+        if not np.any(mask):
+            by_sofa[key] = [0] * (NUM_ACTIONS - 1)
+        else:
+            bin_counts = np.bincount(actions[mask], minlength=NUM_ACTIONS)[1:]
+            by_sofa[key] = bin_counts.astype(int).tolist()
+    return {
+        "physician_action_counts_24": counts.astype(int).tolist(),
+        "physician_action_counts_24_by_sofa": by_sofa,
+    }
 
 
 def episode_start_indices(df: pd.DataFrame) -> np.ndarray:
@@ -171,6 +195,7 @@ def main() -> None:
         ),
     }
     metrics.update(mortality_summary(test_df))
+    metrics.update(physician_action_counts(test_df))
 
     metrics_path = args.output_dir / "eval_metrics.json"
     metrics_path.write_text(json.dumps(metrics, indent=2))
