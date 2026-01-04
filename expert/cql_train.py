@@ -93,7 +93,7 @@ class DuelingQNetwork(tf.keras.Model):
 
         x = self.fc2(x)
         x = self.bn2(x, training=training)
-       x = self.act2(x)
+        x = self.act2(x)
 
         stream_a, stream_v = tf.split(x, num_or_size_splits=2, axis=-1)
         adv = self.adv_head(stream_a)
