@@ -39,6 +39,13 @@ def action_ids(df: pd.DataFrame) -> np.ndarray:
 def build_transitions(
     df: pd.DataFrame, state_features: list[str]
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    required_cols = state_features + ["reward", "iv_input", "vaso_input", "icustayid"]
+    missing_mask = df[required_cols].isna().any(axis=1)
+    dropped = int(missing_mask.sum())
+    if dropped > 0:
+        print(f"[debug] Dropping {dropped} rows with missing required fields.")
+    df = df.loc[~missing_mask].reset_index(drop=True)
+
     states = df[state_features].to_numpy(dtype=np.float32)
     actions = action_ids(df).astype(np.int32)
     rewards = df["reward"].to_numpy(dtype=np.float32)
@@ -53,6 +60,13 @@ def build_transitions(
         else:
             next_states[idx] = 0.0
             dones[idx] = 1.0
+
+    if not np.isfinite(states).all():
+        raise ValueError("Non-finite values detected in states after preprocessing.")
+    if not np.isfinite(rewards).all():
+        raise ValueError("Non-finite values detected in rewards after preprocessing.")
+    if actions.min() < 0 or actions.max() >= NUM_ACTIONS:
+        raise ValueError("Actions out of range after preprocessing.")
 
     return states, actions, rewards, next_states, dones
 
@@ -79,7 +93,7 @@ class DuelingQNetwork(tf.keras.Model):
 
         x = self.fc2(x)
         x = self.bn2(x, training=training)
-        x = self.act2(x)
+       x = self.act2(x)
 
         stream_a, stream_v = tf.split(x, num_or_size_splits=2, axis=-1)
         adv = self.adv_head(stream_a)
@@ -116,6 +130,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tau", type=float, default=DEFAULT_TAU)
     parser.add_argument("--lr", type=float, default=DEFAULT_LR)
     parser.add_argument("--cql-alpha", type=float, default=DEFAULT_CQL_ALPHA)
+    parser.add_argument("--debug-every", type=int, default=1000)
     return parser.parse_args()
 
 
@@ -131,6 +146,13 @@ def main() -> None:
 
     states, actions, rewards, next_states, dones = build_transitions(
         train_df, state_features
+    )
+    if len(states) == 0:
+        raise ValueError("No valid rows remain after dropping missing required fields.")
+    print(
+        f"[debug] dataset rows={len(states)} "
+        f"actions_range=({actions.min()},{actions.max()}) "
+        f"reward_range=({rewards.min():.3f},{rewards.max():.3f})"
     )
 
     main_model = DuelingQNetwork(states.shape[1], NUM_ACTIONS)
@@ -190,8 +212,21 @@ def main() -> None:
         )
         soft_update(target_model, main_model, args.tau)
 
-        if step % 1000 == 0:
-            print(f"Step {step}: loss={loss.numpy():.6f}")
+        if step % args.debug_every == 0:
+            q_now = main_model(batch_states, training=False)
+            q_min = float(tf.reduce_min(q_now).numpy())
+            q_max = float(tf.reduce_max(q_now).numpy())
+            rewards_min = float(tf.reduce_min(batch_rewards).numpy())
+            rewards_max = float(tf.reduce_max(batch_rewards).numpy())
+            loss_val = float(loss.numpy())
+            print(
+                f"Step {step}: loss={loss_val:.6f} "
+                f"q_range=({q_min:.3f},{q_max:.3f}) "
+                f"reward_range=({rewards_min:.3f},{rewards_max:.3f})"
+            )
+            if np.isnan(loss_val):
+                print("[debug] Loss is NaN. Stopping for inspection.")
+                break
 
     model_path = args.output_dir / "model.weights.h5"
     main_model.save_weights(model_path)
