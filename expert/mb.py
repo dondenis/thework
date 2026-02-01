@@ -34,7 +34,8 @@ val_df = pd.read_csv('/content/drive/MyDrive/sepsisrl/data/rl_val_data_final_con
 test_df = pd.read_csv('/content/drive/MyDrive/sepsisrl/data/rl_test_data_final_cont.csv')
 eval_df = pd.concat([val_df, test_df], ignore_index=True)
 state_dim = len(state_features)
-action_dim = 2
+action_bins = 5
+action_dim = action_bins * action_bins
 print('Train samples:', len(train_df))
 print('Eval samples:', len(eval_df))
 print('Number of state features:', state_dim)
@@ -43,6 +44,9 @@ print('Number of state features:', state_dim)
 # Helper function to build transitions where the next state is the following bloc in the same ICU stay, matching the logic used in `cql_q_network.ipynb`.
 
 # %%
+action_map = {(iv, vaso): iv * action_bins + vaso for iv in range(action_bins) for vaso in range(action_bins)}
+
+
 def build_transitions(df):
     states, actions, rewards, next_states, done_flags = [], [], [], [], []
     N = len(df)
@@ -50,14 +54,21 @@ def build_transitions(df):
 
     for i in range(N):
         cur_state = onp.asarray(df.loc[i, state_features])
-        action    = onp.asarray(df.loc[i, ['vaso_input', 'iv_input']])
-        reward    = float(df.loc[i, 'reward'])
+        iv = int(df.loc[i, 'iv_input'])
+        vaso = int(df.loc[i, 'vaso_input'])
+        iv = int(onp.clip(iv, 0, action_bins - 1))
+        vaso = int(onp.clip(vaso, 0, action_bins - 1))
+        action_id = action_map[(iv, vaso)]
+        action = onp.zeros(action_dim, dtype=onp.float32)
+        action[action_id] = 1.0
 
         if i != N - 1 and df.loc[i, 'icustayid'] == df.loc[i + 1, 'icustayid']:
             nxt = onp.asarray(df.loc[i + 1, state_features])
+            reward = float(df.loc[i + 1, 'reward'])
             done = 0
         else:
             nxt = onp.zeros(len(state_features), dtype=onp.float32)
+            reward = float(df.loc[i, 'reward'])
             done = 1
 
         states.append(cur_state)
@@ -163,8 +174,15 @@ class SepsisBNNEnv:
         self.state = train_states[self.idx]
         return self.state
     def step(self, action):
+        if onp.ndim(action) > 0:
+            action_id = int(onp.argmax(action))
+        else:
+            action_id = int(action)
+        action_id = int(onp.clip(action_id, 0, action_dim - 1))
+        action_vec = onp.zeros(action_dim, dtype=onp.float32)
+        action_vec[action_id] = 1.0
         weights = self.mean + onp.exp(self.log_std) * self.rs.randn(1, len(self.mean))
-        delta = self.pred_fun(weights, onp.hstack([self.state, action])[None,:])[0]
+        delta = self.pred_fun(weights, onp.hstack([self.state, action_vec])[None, :])[0]
         next_state = self.state + delta
         reward = train_rewards[self.idx]
         done = bool(train_done[self.idx])
@@ -173,7 +191,7 @@ class SepsisBNNEnv:
         return next_state, reward, done, {}
 
 env = SepsisBNNEnv(mean, log_std, pred_fun)
-ppo = PPO(state_dim=state_dim, action_dim=action_dim, lr_actor=3e-4, lr_critic=1e-3, gamma=0.99, K_epochs=5, eps_clip=0.2, has_continuous_action_space=True)
+ppo = PPO(state_dim=state_dim, action_dim=action_dim, lr_actor=3e-4, lr_critic=1e-3, gamma=0.99, K_epochs=5, eps_clip=0.2, has_continuous_action_space=False)
 for episode in range(2):
     state = env.reset()
     for t in range(5):
@@ -194,5 +212,3 @@ print('[ppo] training loop finished')
 # ## Combining PPO with Clinician Policy based on SOFA
 # 
 # Placeholder for blending strategies that rely on clinician policy when SOFA indicates low-confidence regions.
-
-
