@@ -564,7 +564,7 @@ with tf.Session(config=config) as sess:
 pd.Series(agent_actions).value_counts()
 
 # %%
-% matplotlib inline
+# matplotlib inline
 pd.Series(agent_actions).hist(bins=50)
 
 # %%

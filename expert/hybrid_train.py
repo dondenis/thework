@@ -18,6 +18,8 @@ if "--config" in sys.argv:
     raise SystemExit(0)
 from __future__ import annotations
 
+    run_policy_cli("hybrid")
+    raise SystemExit(0)
 import argparse
 import json
 from dataclasses import dataclass

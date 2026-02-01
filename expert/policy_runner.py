@@ -14,6 +14,10 @@ from preprocessing.config_utils import Config, load_config
 from expert.policy_outputs import build_policy_outputs
 
 
+def load_state_features(path: str) -> list[str]:
+    return Path(path).read_text().split()
+
+
 def load_split(cfg: Config, split: str) -> pd.DataFrame:
     split_map = {
         "train": cfg.paths["train_csv"],
@@ -52,6 +56,46 @@ def build_placeholder_pi(df: pd.DataFrame, action_bins: ActionBins, columns: Dic
     iv_bins = np.array([bin_action(v, action_bins.iv_edges) for v in iv], dtype=int)
     action_ids = iv_bins * 5 + vaso_bins
     return one_hot(action_ids)
+
+
+def compute_action_ids(
+    df: pd.DataFrame,
+    action_bins: ActionBins,
+    columns: Dict[str, str],
+) -> np.ndarray:
+    vaso_col = columns.get("vaso_input", "vaso_input")
+    iv_col = columns.get("iv_input", "iv_input")
+    vaso = df[vaso_col].fillna(0).to_numpy(dtype=float)
+    iv = df[iv_col].fillna(0).to_numpy(dtype=float)
+    vaso_bins = np.array([bin_action(v, action_bins.vaso_edges) for v in vaso], dtype=int)
+    iv_bins = np.array([bin_action(v, action_bins.iv_edges) for v in iv], dtype=int)
+    return iv_bins * 5 + vaso_bins
+
+
+def knn_policy_probs(
+    train_states: np.ndarray,
+    train_actions: np.ndarray,
+    eval_states: np.ndarray,
+    k: int,
+    num_actions: int = 25,
+    chunk_size: int = 256,
+) -> np.ndarray:
+    k = min(k, len(train_states))
+    probs = np.zeros((len(eval_states), num_actions), dtype=np.float32)
+    train_states = train_states.astype(np.float32)
+    eval_states = eval_states.astype(np.float32)
+    train_actions = train_actions.astype(int)
+
+    for start in range(0, len(eval_states), chunk_size):
+        end = min(start + chunk_size, len(eval_states))
+        chunk = eval_states[start:end]
+        diffs = chunk[:, None, :] - train_states[None, :, :]
+        dists = np.sum(diffs * diffs, axis=2)
+        nn_idx = np.argpartition(dists, k - 1, axis=1)[:, :k]
+        for row_idx, neighbors in enumerate(nn_idx):
+            counts = np.bincount(train_actions[neighbors], minlength=num_actions).astype(np.float32)
+            probs[start + row_idx] = counts / counts.sum()
+    return probs
 
 
 def save_checkpoint(policy: str, cfg: Config, params: Dict[str, float]) -> Path:
@@ -93,7 +137,16 @@ def run_policy(policy: str, cfg: Config, split: str, hparams_path: Optional[str]
         save_checkpoint(policy, cfg, params)
         print(f"Saved checkpoint for {policy} to results/models/{policy}_best.pkl")
 
-    pi = build_placeholder_pi(df, action_bins, cfg.columns)
+    if policy == "physician":
+        train_df = load_split(cfg, "train")
+        state_features = load_state_features(cfg.paths["state_features"])
+        train_states = train_df[state_features].fillna(0).to_numpy(dtype=np.float32)
+        eval_states = df[state_features].fillna(0).to_numpy(dtype=np.float32)
+        train_actions = compute_action_ids(train_df, action_bins, cfg.columns)
+        knn_k = int(params.get("knn_k", 300))
+        pi = knn_policy_probs(train_states, train_actions, eval_states, knn_k)
+    else:
+        pi = build_placeholder_pi(df, action_bins, cfg.columns)
     q_values = np.zeros_like(pi)
     extras: Dict[str, np.ndarray] = {}
     if policy == "hybrid":

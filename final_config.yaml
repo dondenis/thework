@@ -35,6 +35,8 @@ hyperparams:
     gamma: 0.99
     lr: 0.0003
     alpha: 1.0
+  physician:
+    knn_k: 300
   dddqn:
     gamma: 0.99
     lr: 0.0005
