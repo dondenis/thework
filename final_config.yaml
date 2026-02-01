@@ -1,0 +1,62 @@
+paths:
+  train_csv: data/rl_train_data_final_cont.csv
+  val_csv: data/rl_val_data_final_cont.csv
+  test_csv: data/rl_test_data_final_cont.csv
+  state_features: data/state_features.txt
+  results_dir: results
+columns:
+  icustayid: icustayid
+  reward: reward
+  iv_input: iv_input
+  vaso_input: vaso_input
+  sofa: SOFA
+seeds:
+  global: 42
+  policies:
+    physician: 101
+    cql: 102
+    dddqn: 103
+    mb: 104
+    moe: 105
+    hybrid: 106
+action_bins:
+  num_bins: 5
+  bin0_value: 0
+  method: quartiles
+policies:
+  - physician
+  - cql
+  - dddqn
+  - mb
+  - moe
+  - hybrid
+hyperparams:
+  cql:
+    gamma: 0.99
+    lr: 0.0003
+    alpha: 1.0
+  dddqn:
+    gamma: 0.99
+    lr: 0.0005
+    epsilon: 0.1
+  mb:
+    gamma: 0.99
+    ppo_epochs: 5
+  moe:
+    gamma: 0.99
+  hybrid:
+    gamma: 0.99
+    delta: 0.1
+    tau: 0.5
+hpo_spaces:
+  cql:
+    lr: [0.0001, 0.0003, 0.0005]
+    alpha: [0.5, 1.0, 2.0]
+  dddqn:
+    lr: [0.0003, 0.0005, 0.001]
+    epsilon: [0.05, 0.1, 0.2]
+  hybrid:
+    tau: [0.3, 0.5, 0.7]
+    delta: [0.05, 0.1, 0.2]
+reporting:
+  bootstrap_samples: 200

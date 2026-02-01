@@ -1,4 +1,23 @@
 # %%
+# Colab quickstart (optional)
+# from google.colab import drive
+# drive.mount("/content/drive")
+# %cd /content/drive/MyDrive/sepsisrl
+# !pip install -r requirements.txt
+# python expert/moe.py --config final_config.yaml --train_or_load --eval_split val
+#
+# --- CLI entrypoint for reproducible reporting ---
+import sys
+from pathlib import Path
+
+if "--config" in sys.argv:
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from policy_runner import run_policy_cli
+
+    run_policy_cli("moe")
+    raise SystemExit(0)
+
+# %%
 import pandas as pd
 import pickle as pkl
 import string
@@ -8,6 +27,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Note that if it not worthwhile to run the following code on GPU
 # since even if we try to vectorize it as much as possible
 # the objective function (computational heavy) still contains many loops
@@ -591,6 +612,3 @@ train_fence_post = get_fence_post(train_df)
 test_fence_post = get_fence_post(test_df)
 
 # %%
-
-
-
