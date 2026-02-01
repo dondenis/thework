@@ -61,9 +61,9 @@ def q_learn_backwards_new(trajectory):
         assert(abs(reward) <= REWARD_THRESHOLD)
         if count == 1:
             if reward == 0:
-                print "length is ", len(trajectory)
-                print "count is ", count
-                print reversed_traj
+                print("length is ", len(trajectory))
+                print("count is ", count)
+                print(reversed_traj)
                 sys.exit(-1)
             else:
                 q_new[state, action] = q_new[state, action] + alpha * (reward - q_new[state,action])
@@ -71,8 +71,8 @@ def q_learn_backwards_new(trajectory):
             try:
                 next_state = reversed_traj.ix[row + 1,'state']
             except KeyError:
-                print "row is ", row
-                print reversed_traj
+                print("row is ", row)
+                print(reversed_traj)
                 raise
             # COMMENT OUT NEXT FOUR if we wish to learn Qstar - the optimal q function
             next_iv = int(reversed_traj.ix[row+1, 'iv_tev_in'])
@@ -94,7 +94,7 @@ for step in range(num_steps):
     if step % 1000 == 0:
         net_qs.append(np.sum(q_new))
     if step % 10000 == 0:
-        print step
+        print(step)
     traj_id = np.random.choice(unique_ids)
     # select the rows that match this traj id
     trajectory = df.loc[df['icustayid'] == traj_id]
@@ -102,10 +102,10 @@ for step in range(num_steps):
         q_learn_backwards_new(trajectory)
 
 # %%
-%matplotlib inline
-import matplotlib.pyplot as plt
-plt.plot(net_qs)
-plt.show
+# %matplotlib inline
+# import matplotlib.pyplot as plt
+# plt.plot(net_qs)
+# plt.show()
 
 # %%
 # pickle the q vals to file for purposes of evaluation
@@ -126,5 +126,3 @@ for state in range(1250):
 # %%
 with open('policy_discrete_sarsa.p', 'wb') as f:
     pickle.dump(policy, f)
-
-

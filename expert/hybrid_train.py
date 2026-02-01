@@ -14,7 +14,7 @@ from pathlib import Path
 
 if "--config" in sys.argv:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
-    from policy_runner import run_policy_cli
+    from expert.policy_runner import run_policy_cli
 
     run_policy_cli("hybrid")
     raise SystemExit(0)
