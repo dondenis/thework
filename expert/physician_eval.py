@@ -11,6 +11,8 @@ from typing import Dict, Any
 import numpy as np
 import pandas as pd
 
+from preprocessing.sofa_utils import sofa_bins
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT))
 
@@ -38,17 +40,6 @@ def episode_start_indices(df: pd.DataFrame) -> np.ndarray:
         if icustay[idx] != icustay[idx - 1]:
             starts.append(idx)
     return np.asarray(starts, dtype=int)
-
-
-def sofa_bins(sofa_values: np.ndarray) -> np.ndarray:
-    sofa = sofa_values.astype(float)
-    if sofa.max() <= 1.0:
-        sofa = sofa * 24.0
-    bins = np.empty(len(sofa), dtype=object)
-    bins[sofa < 5] = "low"
-    bins[(sofa >= 5) & (sofa <= 15)] = "medium"
-    bins[sofa > 15] = "high"
-    return bins
 
 
 def mortality_summary(df: pd.DataFrame) -> Dict[str, float]:

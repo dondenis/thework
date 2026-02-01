@@ -1,4 +1,23 @@
 # %%
+# Colab quickstart (optional)
+# from google.colab import drive
+# drive.mount("/content/drive")
+# %cd /content/drive/MyDrive/sepsisrl
+# !pip install -r requirements.txt
+# python expert/dddqn.py --config final_config.yaml --train_or_load --eval_split val
+#
+# --- CLI entrypoint for reproducible reporting ---
+import sys
+from pathlib import Path
+
+if "--config" in sys.argv:
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from policy_runner import run_policy_cli
+
+    run_policy_cli("dddqn")
+    raise SystemExit(0)
+
+# %%
 import tensorflow as tf
 import numpy as np
 import math
@@ -545,13 +564,10 @@ with tf.Session(config=config) as sess:
 pd.Series(agent_actions).value_counts()
 
 # %%
-% matplotlib inline
+# matplotlib inline
 pd.Series(agent_actions).hist(bins=50)
 
 # %%
 np.random.get_state()
 
 # %%
-
-
-
