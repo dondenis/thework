@@ -1,4 +1,22 @@
 # %%
+import sys
+from pathlib import Path
+
+if any(
+    flag in sys.argv
+    for flag in [
+        "--make_pipeline_diagram",
+        "--make_hybrid_architecture_diagram",
+        "--run_hpo",
+        "--self_test",
+    ]
+):
+    sys.path.append(str(Path(__file__).resolve().parent))
+    from exploration_tools import main
+
+    main()
+    raise SystemExit(0)
+
 # JUPYTER CELL — 0) Setup & Load  (ADJUSTED)
 import pandas as pd
 import numpy as np
@@ -424,6 +442,5 @@ plt.title("Action counts (IV bin x VP bin) [5x5]")
 plt.xlabel("VP bin (0..4)"); plt.ylabel("IV bin (0..4)")
 plt.colorbar()
 plt.show()
-
 
 

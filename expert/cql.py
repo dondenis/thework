@@ -1,3 +1,22 @@
+"""
+Colab quickstart (optional):
+    from google.colab import drive
+    drive.mount(\"/content/drive\")
+    %cd /content/drive/MyDrive/sepsisrl
+    !pip install -r requirements.txt
+    python expert/cql.py --config final_config.yaml --train_or_load --eval_split val
+"""
+
+import sys
+from pathlib import Path
+
+if "--config" in sys.argv:
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from policy_runner import run_policy_cli
+
+    run_policy_cli("cql")
+    raise SystemExit(0)
+
 # %%
 from google.colab import drive
 drive.mount('/content/drive')
@@ -555,5 +574,3 @@ pd.Series(phys_actions).value_counts()
 
 # %%
 pd.Series(agent_actions).value_counts()
-
-

@@ -12,6 +12,8 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 
+from preprocessing.sofa_utils import sofa_bins
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT))
 
@@ -124,17 +126,6 @@ def action_ids(df: pd.DataFrame) -> np.ndarray:
 
 def one_hot_actions(actions: np.ndarray) -> np.ndarray:
     return np.eye(NUM_ACTIONS, dtype=np.float32)[actions]
-
-
-def sofa_bins(sofa_values: np.ndarray) -> np.ndarray:
-    sofa = sofa_values.astype(float)
-    if sofa.max() <= 1.0:
-        sofa = sofa * 24.0
-    bins = np.empty(len(sofa), dtype=object)
-    bins[sofa < 5] = "low"
-    bins[(sofa >= 5) & (sofa <= 15)] = "medium"
-    bins[sofa > 15] = "high"
-    return bins
 
 
 def physician_action_counts(df: pd.DataFrame) -> Dict[str, Any]:

@@ -1,5 +1,22 @@
 # THIS VERSION IS SLIGHT MODIFIED IN ORDER TO SOLVE V AND Q FOR PHYSICIAN POLICIES.
 # INSTEAD OF TAKING MAX, WE TAKE MEAN, NAMELY, double_q_value = np.mean(Q2, axis=1)
+# Colab quickstart (optional)
+# from google.colab import drive
+# drive.mount("/content/drive")
+# %cd /content/drive/MyDrive/sepsisrl
+# !pip install -r requirements.txt
+# python expert/physician_v1.py --config final_config.yaml --train_or_load --eval_split val
+#
+# --- CLI entrypoint for reproducible reporting ---
+import sys
+from pathlib import Path
+
+if "--config" in sys.argv:
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from policy_runner import run_policy_cli
+
+    run_policy_cli("physician")
+    raise SystemExit(0)
 import tensorflow as tf
 import numpy as np
 import math

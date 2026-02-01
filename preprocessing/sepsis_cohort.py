@@ -43,6 +43,96 @@ Note: The size of the cohort will depend on which version of MIMIC-III is used.
 The original cohort from the 2018 Nature Medicine publication was built using MIMIC-III v1.3.
 """
 
+import sys
+from pathlib import Path
+
+if __name__ == "__main__" and "--write_cohort_report" in sys.argv:
+    import argparse
+    import warnings
+
+    import pandas as pd
+
+    from preprocessing.config_utils import load_config, load_splits
+
+    parser = argparse.ArgumentParser(description="Write cohort flow summary report")
+    parser.add_argument("--config", required=True, help="Path to final_config.yaml")
+    parser.add_argument("--write_cohort_report", action="store_true")
+    args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    train_df, val_df, test_df = load_splits(cfg)
+    combined_df = pd.concat([train_df, val_df], ignore_index=True)
+
+    results_dir = cfg.results_dir
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    def summarize(df: pd.DataFrame) -> dict:
+        stays = df["icustayid"].nunique()
+        age_median = float(df["age"].median()) if "age" in df.columns else float("nan")
+        if "gender" in df.columns:
+            female_pct = float((df["gender"] == 1).mean() * 100.0)
+        else:
+            female_pct = float("nan")
+        return {
+            "stays": stays,
+            "patients": "NA",
+            "age_median": age_median,
+            "female_pct": female_pct,
+        }
+
+    rows = []
+    warning_note = (
+        "Limited to final splits; upstream ICU/sepsis candidate stages unavailable."
+    )
+    warnings.warn(warning_note)
+    for stage in [
+        "all ICU stays",
+        "sepsis-3 candidates",
+        "exclude no IV",
+        "exclude >8 missing @ onset",
+    ]:
+        rows.append(
+            {
+                "stage": stage,
+                "stays": "NA",
+                "patients": "NA",
+                "age_median": "NA",
+                "female_pct": "NA",
+                "note": warning_note,
+            }
+        )
+
+    train_val_summary = summarize(combined_df)
+    rows.append(
+        {
+            "stage": "final train+val",
+            "stays": train_val_summary["stays"],
+            "patients": train_val_summary["patients"],
+            "age_median": train_val_summary["age_median"],
+            "female_pct": train_val_summary["female_pct"],
+            "note": "",
+        }
+    )
+    test_summary = summarize(test_df)
+    rows.append(
+        {
+            "stage": "final test",
+            "stays": test_summary["stays"],
+            "patients": test_summary["patients"],
+            "age_median": test_summary["age_median"],
+            "female_pct": test_summary["female_pct"],
+            "note": "",
+        }
+    )
+
+    report_df = pd.DataFrame(rows)
+    csv_path = results_dir / "cohort_flow_summary.csv"
+    tex_path = results_dir / "cohort_flow_summary.tex"
+    report_df.to_csv(csv_path, index=False)
+    tex_path.write_text(report_df.to_latex(index=False), encoding="utf-8")
+    print(f"Wrote cohort flow summary to {csv_path} and {tex_path}")
+    raise SystemExit(0)
+
 import argparse
 import pyprind
 
