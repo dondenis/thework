@@ -1,4 +1,6 @@
 """Train a model-based PPO head, then learn a gating model to blend with CQL."""
+from __future__ import annotations
+
 # Colab quickstart (optional)
 # from google.colab import drive
 # drive.mount("/content/drive")
@@ -16,15 +18,10 @@ if "--config" in sys.argv:
 
     run_policy_cli("hybrid")
     raise SystemExit(0)
-from __future__ import annotations
 
-    run_policy_cli("hybrid")
-    raise SystemExit(0)
 import argparse
 import json
 from dataclasses import dataclass
-from pathlib import Path
-import sys
 from typing import Dict, List, Tuple
 
 import numpy as np
