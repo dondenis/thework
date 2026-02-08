@@ -20,6 +20,7 @@ sys.path.append(str(ROOT))
 from ope import compute_direct_method, compute_phwdr, compute_phwis
 from ope.phwdr import build_episodes as build_phwdr_episodes
 from ope.phwis import build_episodes as build_phwis_episodes
+from preprocessing.config_utils import load_config
 
 NUM_ACTIONS = 25
 DEFAULT_GAMMA = 0.99
@@ -280,6 +281,9 @@ def episode_start_indices(df: pd.DataFrame) -> np.ndarray:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate hybrid gating policy")
+    parser.add_argument("--config", type=str, default=None)
+    parser.add_argument("--train_or_load", action="store_true")
+    parser.add_argument("--eval_split", choices=["val", "test"], default="test")
     parser.add_argument(
         "--data-dir",
         type=Path,
@@ -307,6 +311,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    if args.config:
+        cfg = load_config(args.config)
+        split_key = f"{args.eval_split}_csv"
+        split_path = Path(cfg.paths[split_key])
+        args.data_dir = split_path.parent
+        args.test_csv = split_path.name
+        args.train_csv = Path(cfg.paths["train_csv"]).name
+
     args.hybrid_dir.mkdir(parents=True, exist_ok=True)
 
     # NOTE: To run on Colab (T4 GPU), mount Drive and set --data-dir/--hybrid-dir

@@ -36,6 +36,13 @@ def action_ids(df: pd.DataFrame) -> np.ndarray:
 def build_transitions(
     df: pd.DataFrame, state_features: list[str]
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    required_cols = state_features + ["reward", "iv_input", "vaso_input", "icustayid"]
+    missing_mask = df[required_cols].isna().any(axis=1)
+    dropped = int(missing_mask.sum())
+    if dropped > 0:
+        print(f"[debug] Dropping {dropped} rows with missing required fields.")
+    df = df.loc[~missing_mask].reset_index(drop=True)
+
     states = df[state_features].to_numpy(dtype=np.float32)
     actions = action_ids(df).astype(np.int32)
     rewards = df["reward"].to_numpy(dtype=np.float32)
@@ -50,6 +57,13 @@ def build_transitions(
         else:
             next_states[idx] = 0.0
             dones[idx] = 1.0
+
+    if not np.isfinite(states).all():
+        raise ValueError("Non-finite values detected in states after preprocessing.")
+    if not np.isfinite(rewards).all():
+        raise ValueError("Non-finite values detected in rewards after preprocessing.")
+    if actions.min() < 0 or actions.max() >= NUM_ACTIONS:
+        raise ValueError("Actions out of range after preprocessing.")
 
     return states, actions, rewards, next_states, dones
 
