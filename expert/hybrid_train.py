@@ -108,11 +108,11 @@ class DuelingQNetwork(tf.keras.Model):
         super().__init__()
         self.fc1 = tf.keras.layers.Dense(128, use_bias=False)
         self.bn1 = tf.keras.layers.BatchNormalization(center=True, scale=True)
-        self.act1 = tf.keras.layers.LeakyReLU(alpha=0.01)
+        self.act1 = tf.keras.layers.LeakyReLU(negative_slope=0.01)
 
         self.fc2 = tf.keras.layers.Dense(128, use_bias=False)
         self.bn2 = tf.keras.layers.BatchNormalization(center=True, scale=True)
-        self.act2 = tf.keras.layers.LeakyReLU(alpha=0.01)
+        self.act2 = tf.keras.layers.LeakyReLU(negative_slope=0.01)
 
         kinit = tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.05)
         self.adv_head = tf.keras.layers.Dense(num_actions, kernel_initializer=kinit)
@@ -193,6 +193,34 @@ def train_dynamics_ensemble(
         )
         models.append(model)
     return models
+
+
+def load_dynamics_ensemble(
+    dynamics_dir: Path,
+    input_dim: int,
+    output_dim: int,
+) -> List[DynamicsModel]:
+    models: List[DynamicsModel] = []
+    for weight_file in sorted(dynamics_dir.glob("model_*.weights.h5")):
+        model = DynamicsModel(input_dim, output_dim)
+        _ = model(tf.zeros((1, input_dim), dtype=tf.float32))
+        model.load_weights(weight_file)
+        models.append(model)
+    if not models:
+        raise FileNotFoundError(f"No dynamics weights found in {dynamics_dir}")
+    return models
+
+
+def select_reference_states(
+    ref_states: np.ndarray,
+    max_states: int,
+    seed: int = 0,
+) -> np.ndarray:
+    if max_states <= 0 or len(ref_states) <= max_states:
+        return ref_states
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(len(ref_states), size=max_states, replace=False)
+    return ref_states[idx]
 
 
 def ppo_rollout(
@@ -419,14 +447,69 @@ def compute_traj_lengths(df: pd.DataFrame) -> np.ndarray:
 
 
 def max_neighbor_distance(states: np.ndarray, ref_states: np.ndarray, k: int) -> np.ndarray:
-    k = min(k, len(ref_states) - 1)
-    distances = []
-    for state in states:
-        diffs = ref_states - state
-        dist = np.linalg.norm(diffs, axis=1)
-        topk = np.partition(dist, k)[:k]
-        distances.append(np.max(topk))
-    return np.array(distances, dtype=np.float32)
+    return max_neighbor_distance_batched(states, ref_states, k, batch_size=256)
+
+
+def max_neighbor_distance_batched(
+    states: np.ndarray,
+    ref_states: np.ndarray,
+    k: int,
+    batch_size: int,
+) -> np.ndarray:
+    if len(ref_states) == 0:
+        return np.zeros(len(states), dtype=np.float32)
+    k = max(1, min(k, len(ref_states)))
+    out = np.zeros(len(states), dtype=np.float32)
+    ref_sq = np.sum(ref_states * ref_states, axis=1)
+    for start in range(0, len(states), batch_size):
+        end = min(start + batch_size, len(states))
+        batch = states[start:end]
+        batch_sq = np.sum(batch * batch, axis=1, keepdims=True)
+        d2 = np.maximum(batch_sq + ref_sq[None, :] - 2.0 * (batch @ ref_states.T), 0.0)
+        topk = np.partition(d2, kth=k - 1, axis=1)[:, :k]
+        out[start:end] = np.sqrt(np.max(topk, axis=1))
+    return out
+
+
+def load_hybrid_datasets(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    state_features = load_state_features(args.data_dir)
+    train_df = pd.read_csv(args.data_dir / args.train_csv)
+    val_df = pd.read_csv(args.data_dir / args.val_csv)
+    train_states, train_actions, train_rewards, train_next, _ = build_transitions(train_df, state_features)
+    val_states, val_actions, _, val_next, _ = build_transitions(val_df, state_features)
+    return train_df, val_df, train_states, train_actions, train_rewards, train_next, val_states, val_actions, val_next
+
+
+def initialize_mb_components(
+    args: argparse.Namespace,
+    train_states: np.ndarray,
+    train_actions: np.ndarray,
+    train_rewards: np.ndarray,
+    train_next: np.ndarray,
+    policy: PolicyNet,
+    value_net: ValueNet,
+) -> List[DynamicsModel]:
+    if args.use_pretrained_mb:
+        dyn_input_dim = train_states.shape[1] + NUM_ACTIONS
+        dyn_output_dim = train_states.shape[1] + 1
+        dynamics_models = load_dynamics_ensemble(args.mb_dir / "dynamics", dyn_input_dim, dyn_output_dim)
+        policy.load_weights(args.mb_dir / "ppo_policy.weights.h5")
+        value_net.load_weights(args.mb_dir / "ppo_value.weights.h5")
+        print(f"Loaded pretrained MB artifacts from {args.mb_dir}")
+        return dynamics_models
+
+    dyn_inputs = np.hstack([train_states, one_hot_actions(train_actions)])
+    dyn_targets = np.hstack([
+        train_next - train_states,
+        train_rewards[:, None],
+    ])
+    return train_dynamics_ensemble(
+        dyn_inputs,
+        dyn_targets,
+        ensemble_size=args.ensemble_size,
+        epochs=args.bnn_epochs,
+        batch_size=256,
+    )
 
 
 def train_logistic_regression(
@@ -440,6 +523,7 @@ def train_logistic_regression(
 
     for _ in range(steps):
         logits = features @ weights + bias
+        logits = np.clip(logits, -60.0, 60.0)
         probs = 1.0 / (1.0 + np.exp(-logits))
         grad_w = features.T @ (probs - labels) / len(labels)
         grad_b = float(np.mean(probs - labels))
@@ -481,6 +565,17 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=repo_root() / "outputs" / "hybrid",
     )
+    parser.add_argument(
+        "--mb-dir",
+        type=Path,
+        default=repo_root() / "outputs" / "mb",
+        help="Directory containing pretrained MB dynamics and PPO weights.",
+    )
+    parser.add_argument(
+        "--use-pretrained-mb",
+        action="store_true",
+        help="Load dynamics + PPO policy/value from --mb-dir instead of training MB from scratch.",
+    )
     parser.add_argument("--ensemble-size", type=int, default=5)
     parser.add_argument("--bnn-epochs", type=int, default=5)
     parser.add_argument("--ppo-steps", type=int, default=4000)
@@ -491,6 +586,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--short-horizon", type=int, default=5)
     parser.add_argument("--target-mb-rate", type=float, default=0.5)
     parser.add_argument("--neighbor-k", type=int, default=10)
+    parser.add_argument("--neighbor-batch-size", type=int, default=512)
+    parser.add_argument(
+        "--gate-ref-max-states",
+        type=int,
+        default=20000,
+        help="Max number of train states used for distance-to-neighbors features (<=0 uses all).",
+    )
     parser.add_argument("--tau", type=float, default=DEFAULT_TAU)
     parser.add_argument("--delta", type=float, default=DEFAULT_DELTA)
     return parser.parse_args()
@@ -503,33 +605,30 @@ def main() -> None:
     # NOTE: To run on Colab (T4 GPU), mount Drive and set --data-dir/--output-dir
     # to your Drive paths (e.g., /content/drive/MyDrive/sepsisrl/data).
 
-    state_features = load_state_features(args.data_dir)
-    train_df = pd.read_csv(args.data_dir / args.train_csv)
-    val_df = pd.read_csv(args.data_dir / args.val_csv)
-
-    train_states, train_actions, train_rewards, train_next, train_dones = build_transitions(
-        train_df, state_features
-    )
-    val_states, val_actions, _, val_next, _ = build_transitions(val_df, state_features)
-
-    dyn_inputs = np.hstack([train_states, one_hot_actions(train_actions)])
-    dyn_targets = np.hstack([
-        train_next - train_states,
-        train_rewards[:, None],
-    ])
-
-    dynamics_models = train_dynamics_ensemble(
-        dyn_inputs,
-        dyn_targets,
-        ensemble_size=args.ensemble_size,
-        epochs=args.bnn_epochs,
-        batch_size=256,
-    )
+    train_df, val_df, train_states, train_actions, train_rewards, train_next, val_states, val_actions, val_next = load_hybrid_datasets(args)
 
     policy = PolicyNet(train_states.shape[1])
     value_net = ValueNet(train_states.shape[1])
     _ = policy(train_states[:1])
     _ = value_net(train_states[:1])
+
+    dynamics_models = initialize_mb_components(
+        args,
+        train_states,
+        train_actions,
+        train_rewards,
+        train_next,
+        policy,
+        value_net,
+    )
+
+    cql_model = DuelingQNetwork(val_states.shape[1], NUM_ACTIONS)
+    _ = cql_model(val_states[:1])
+    cql_model.load_weights(args.cql_weights)
+    q_cql = np.nan_to_num(cql_model(val_states).numpy(), nan=0.0, posinf=0.0, neginf=0.0)
+    policy_probs_cql = tf.nn.softmax(q_cql / args.tau).numpy()
+    policy_probs_cql = np.clip(policy_probs_cql, 1e-6, 1.0)
+    policy_probs_cql = policy_probs_cql / policy_probs_cql.sum(axis=1, keepdims=True)
 
     eval_history: List[Dict[str, float]] = []
     best_checkpoint = None
@@ -561,14 +660,6 @@ def main() -> None:
             policy_probs_mb = tf.nn.softmax(q_mb / args.tau).numpy()
             policy_probs_mb = np.clip(policy_probs_mb, 1e-6, 1.0)
             policy_probs_mb = policy_probs_mb / policy_probs_mb.sum(axis=1, keepdims=True)
-
-            cql_model = DuelingQNetwork(val_states.shape[1], NUM_ACTIONS)
-            _ = cql_model(val_states[:1])
-            cql_model.load_weights(args.cql_weights)
-            q_cql = np.nan_to_num(cql_model(val_states).numpy(), nan=0.0, posinf=0.0, neginf=0.0)
-            policy_probs_cql = tf.nn.softmax(q_cql / args.tau).numpy()
-            policy_probs_cql = np.clip(policy_probs_cql, 1e-6, 1.0)
-            policy_probs_cql = policy_probs_cql / policy_probs_cql.sum(axis=1, keepdims=True)
 
             phwdr_mb = compute_short_horizon_phwdr(
                 val_df, policy_probs_mb, q_mb, args.short_horizon, args.gamma
@@ -633,17 +724,10 @@ def main() -> None:
 
     q_mb = compute_q_mb(dynamics_models, value_net, val_states, gamma=args.gamma)
     q_mb = np.nan_to_num(q_mb, nan=0.0, posinf=0.0, neginf=0.0)
-    cql_model = DuelingQNetwork(val_states.shape[1], NUM_ACTIONS)
-    _ = cql_model(val_states[:1])
-    cql_model.load_weights(args.cql_weights)
-    q_cql = np.nan_to_num(cql_model(val_states).numpy(), nan=0.0, posinf=0.0, neginf=0.0)
 
     policy_probs_mb = tf.nn.softmax(q_mb / args.tau).numpy()
     policy_probs_mb = np.clip(policy_probs_mb, 1e-6, 1.0)
     policy_probs_mb = policy_probs_mb / policy_probs_mb.sum(axis=1, keepdims=True)
-    policy_probs_cql = tf.nn.softmax(q_cql / args.tau).numpy()
-    policy_probs_cql = np.clip(policy_probs_cql, 1e-6, 1.0)
-    policy_probs_cql = policy_probs_cql / policy_probs_cql.sum(axis=1, keepdims=True)
 
     phwdr_mb = compute_short_horizon_phwdr(
         val_df, policy_probs_mb, q_mb, args.short_horizon, args.gamma
@@ -665,7 +749,13 @@ def main() -> None:
     labels = np.array(labels, dtype=np.float32)
 
     traj_lengths = compute_traj_lengths(val_df)
-    max_dist = max_neighbor_distance(val_states, train_states, args.neighbor_k)
+    gate_ref_states = select_reference_states(train_states, args.gate_ref_max_states)
+    max_dist = max_neighbor_distance_batched(
+        val_states,
+        gate_ref_states,
+        args.neighbor_k,
+        batch_size=args.neighbor_batch_size,
+    )
     gate_x = gate_features(val_df, traj_lengths, max_dist)
 
     mean = gate_x.mean(axis=0)
@@ -673,7 +763,8 @@ def main() -> None:
     gate_x = (gate_x - mean) / std
 
     coef, intercept = train_logistic_regression(gate_x, labels)
-    probs = 1.0 / (1.0 + np.exp(-(gate_x @ coef + intercept)))
+    gate_logits = np.clip(gate_x @ coef + intercept, -60.0, 60.0)
+    probs = 1.0 / (1.0 + np.exp(-gate_logits))
     threshold = calibrate_threshold(probs, args.target_mb_rate)
 
     gate_model = GateModel(

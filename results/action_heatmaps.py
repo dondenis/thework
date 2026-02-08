@@ -31,12 +31,20 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    cfg = load_config(args.config)
+    cfg_path = Path(args.config).resolve()
+    cfg = load_config(cfg_path)
     results_dir = cfg.results_dir
+    if not results_dir.is_absolute():
+        results_dir = (cfg_path.parent / results_dir).resolve()
+    results_dir.mkdir(parents=True, exist_ok=True)
     policies = cfg.data.get("policies", [])
+    missing = []
 
     for policy in policies:
         path = results_dir / f"policy_outputs_{policy}_{args.split}.npz"
+        if not path.exists():
+            missing.append(str(path))
+            continue
         data = np.load(path, allow_pickle=True)
         bins = data["action_bin"]
         sofa = data["sofa_bucket"]
@@ -59,6 +67,11 @@ def main() -> None:
         df = pd.DataFrame(counts, columns=[f"vaso_{i}" for i in range(5)])
         df.insert(0, "iv_bin", list(range(5)))
         df.to_csv(results_dir / f"action_counts_{policy}.csv", index=False)
+
+    if missing:
+        print("[warn] Missing policy output files (run expert/* with --train_or_load --eval_split first):")
+        for item in missing:
+            print(f"  - {item}")
 
 
 if __name__ == "__main__":
