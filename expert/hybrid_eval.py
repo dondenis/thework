@@ -289,8 +289,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=repo_root() / "data",
     )
-    parser.add_argument("--train-csv", type=str, default="rl_train_data_final_cont_noterm.csv")
-    parser.add_argument("--test-csv", type=str, default="rl_test_data_final_cont_noterm.csv")
+    parser.add_argument("--train-csv", type=str, default="rl_train_data_final_cont.csv")
+    parser.add_argument("--test-csv", type=str, default="rl_test_data_final_cont.csv")
     parser.add_argument(
         "--cql-weights",
         type=Path,

@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--train-csv",
         type=str,
-        default="rl_train_data_final_cont_noterm.csv",
+        default="rl_train_data_final_cont.csv",
     )
     parser.add_argument(
         "--output-dir",
