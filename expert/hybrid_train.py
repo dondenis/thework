@@ -108,11 +108,11 @@ class DuelingQNetwork(tf.keras.Model):
         super().__init__()
         self.fc1 = tf.keras.layers.Dense(128, use_bias=False)
         self.bn1 = tf.keras.layers.BatchNormalization(center=True, scale=True)
-        self.act1 = tf.keras.layers.LeakyReLU(alpha=0.01)
+        self.act1 = tf.keras.layers.LeakyReLU(negative_slope=0.01)
 
         self.fc2 = tf.keras.layers.Dense(128, use_bias=False)
         self.bn2 = tf.keras.layers.BatchNormalization(center=True, scale=True)
-        self.act2 = tf.keras.layers.LeakyReLU(alpha=0.01)
+        self.act2 = tf.keras.layers.LeakyReLU(negative_slope=0.01)
 
         kinit = tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.05)
         self.adv_head = tf.keras.layers.Dense(num_actions, kernel_initializer=kinit)
@@ -192,6 +192,22 @@ def train_dynamics_ensemble(
             shuffle=True,
         )
         models.append(model)
+    return models
+
+
+def load_dynamics_ensemble(
+    dynamics_dir: Path,
+    input_dim: int,
+    output_dim: int,
+) -> List[DynamicsModel]:
+    models: List[DynamicsModel] = []
+    for weight_file in sorted(dynamics_dir.glob("model_*.weights.h5")):
+        model = DynamicsModel(input_dim, output_dim)
+        _ = model(tf.zeros((1, input_dim), dtype=tf.float32))
+        model.load_weights(weight_file)
+        models.append(model)
+    if not models:
+        raise FileNotFoundError(f"No dynamics weights found in {dynamics_dir}")
     return models
 
 
@@ -440,6 +456,7 @@ def train_logistic_regression(
 
     for _ in range(steps):
         logits = features @ weights + bias
+        logits = np.clip(logits, -60.0, 60.0)
         probs = 1.0 / (1.0 + np.exp(-logits))
         grad_w = features.T @ (probs - labels) / len(labels)
         grad_b = float(np.mean(probs - labels))
@@ -481,6 +498,17 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=repo_root() / "outputs" / "hybrid",
     )
+    parser.add_argument(
+        "--mb-dir",
+        type=Path,
+        default=repo_root() / "outputs" / "mb",
+        help="Directory containing pretrained MB dynamics and PPO weights.",
+    )
+    parser.add_argument(
+        "--use-pretrained-mb",
+        action="store_true",
+        help="Load dynamics + PPO policy/value from --mb-dir instead of training MB from scratch.",
+    )
     parser.add_argument("--ensemble-size", type=int, default=5)
     parser.add_argument("--bnn-epochs", type=int, default=5)
     parser.add_argument("--ppo-steps", type=int, default=4000)
@@ -512,24 +540,32 @@ def main() -> None:
     )
     val_states, val_actions, _, val_next, _ = build_transitions(val_df, state_features)
 
-    dyn_inputs = np.hstack([train_states, one_hot_actions(train_actions)])
-    dyn_targets = np.hstack([
-        train_next - train_states,
-        train_rewards[:, None],
-    ])
-
-    dynamics_models = train_dynamics_ensemble(
-        dyn_inputs,
-        dyn_targets,
-        ensemble_size=args.ensemble_size,
-        epochs=args.bnn_epochs,
-        batch_size=256,
-    )
-
     policy = PolicyNet(train_states.shape[1])
     value_net = ValueNet(train_states.shape[1])
     _ = policy(train_states[:1])
     _ = value_net(train_states[:1])
+
+    if args.use_pretrained_mb:
+        dyn_input_dim = train_states.shape[1] + NUM_ACTIONS
+        dyn_output_dim = train_states.shape[1] + 1
+        dynamics_models = load_dynamics_ensemble(args.mb_dir / "dynamics", dyn_input_dim, dyn_output_dim)
+        policy.load_weights(args.mb_dir / "ppo_policy.weights.h5")
+        value_net.load_weights(args.mb_dir / "ppo_value.weights.h5")
+        print(f"Loaded pretrained MB artifacts from {args.mb_dir}")
+    else:
+        dyn_inputs = np.hstack([train_states, one_hot_actions(train_actions)])
+        dyn_targets = np.hstack([
+            train_next - train_states,
+            train_rewards[:, None],
+        ])
+
+        dynamics_models = train_dynamics_ensemble(
+            dyn_inputs,
+            dyn_targets,
+            ensemble_size=args.ensemble_size,
+            epochs=args.bnn_epochs,
+            batch_size=256,
+        )
 
     eval_history: List[Dict[str, float]] = []
     best_checkpoint = None
@@ -673,7 +709,8 @@ def main() -> None:
     gate_x = (gate_x - mean) / std
 
     coef, intercept = train_logistic_regression(gate_x, labels)
-    probs = 1.0 / (1.0 + np.exp(-(gate_x @ coef + intercept)))
+    gate_logits = np.clip(gate_x @ coef + intercept, -60.0, 60.0)
+    probs = 1.0 / (1.0 + np.exp(-gate_logits))
     threshold = calibrate_threshold(probs, args.target_mb_rate)
 
     gate_model = GateModel(
