@@ -130,10 +130,9 @@ def one_hot_actions(actions: np.ndarray) -> np.ndarray:
     return np.eye(NUM_ACTIONS, dtype=np.float32)[actions]
 
 
-def physician_action_counts(df: pd.DataFrame) -> Dict[str, Any]:
-    actions = action_ids(df)
+def action_counts_summary(actions: np.ndarray, sofa: np.ndarray, prefix: str) -> Dict[str, Any]:
     counts = np.bincount(actions, minlength=NUM_ACTIONS)[1:]
-    bins = sofa_bins(df["SOFA"].to_numpy())
+    bins = sofa_bins(sofa)
     by_sofa = {}
     for label, key in [("low", "low"), ("medium", "mid"), ("high", "high")]:
         mask = bins == label
@@ -143,9 +142,17 @@ def physician_action_counts(df: pd.DataFrame) -> Dict[str, Any]:
             bin_counts = np.bincount(actions[mask], minlength=NUM_ACTIONS)[1:]
             by_sofa[key] = bin_counts.astype(int).tolist()
     return {
-        "physician_action_counts_24": counts.astype(int).tolist(),
-        "physician_action_counts_24_by_sofa": by_sofa,
+        f"{prefix}_action_counts_24": counts.astype(int).tolist(),
+        f"{prefix}_action_counts_24_by_sofa": by_sofa,
     }
+
+
+def physician_action_counts(df: pd.DataFrame) -> Dict[str, Any]:
+    return action_counts_summary(action_ids(df), df["SOFA"].to_numpy(), prefix="physician")
+
+
+def expert_action_counts(df: pd.DataFrame, expert_actions: np.ndarray, prefix: str) -> Dict[str, Any]:
+    return action_counts_summary(expert_actions, df["SOFA"].to_numpy(), prefix=prefix)
 
 
 def build_transitions(
@@ -455,6 +462,9 @@ def main() -> None:
     }
     diagnostics.update(probability_diagnostics(policy_probs))
     diagnostics.update(physician_action_counts(test_df))
+    diagnostics.update(expert_action_counts(test_df, np.argmax(q_cql, axis=1), prefix="cql"))
+    diagnostics.update(expert_action_counts(test_df, np.argmax(q_mb, axis=1), prefix="mb"))
+    diagnostics.update(expert_action_counts(test_df, np.argmax(policy_probs, axis=1), prefix="hybrid"))
 
     metrics_path = args.hybrid_dir / "hybrid_eval_metrics.json"
     metrics_path.write_text(json.dumps(diagnostics, indent=2))

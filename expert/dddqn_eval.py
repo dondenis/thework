@@ -79,10 +79,9 @@ def action_ids(df: pd.DataFrame) -> np.ndarray:
     return (iv * 5 + vaso).to_numpy()
 
 
-def physician_action_counts(df: pd.DataFrame) -> Dict[str, Any]:
-    actions = action_ids(df)
+def action_counts_summary(actions: np.ndarray, sofa: np.ndarray, prefix: str) -> Dict[str, Any]:
     counts = np.bincount(actions, minlength=NUM_ACTIONS)[1:]
-    bins = sofa_bins(df["SOFA"].to_numpy())
+    bins = sofa_bins(sofa)
     by_sofa = {}
     for label, key in [("low", "low"), ("medium", "mid"), ("high", "high")]:
         mask = bins == label
@@ -92,9 +91,17 @@ def physician_action_counts(df: pd.DataFrame) -> Dict[str, Any]:
             bin_counts = np.bincount(actions[mask], minlength=NUM_ACTIONS)[1:]
             by_sofa[key] = bin_counts.astype(int).tolist()
     return {
-        "physician_action_counts_24": counts.astype(int).tolist(),
-        "physician_action_counts_24_by_sofa": by_sofa,
+        f"{prefix}_action_counts_24": counts.astype(int).tolist(),
+        f"{prefix}_action_counts_24_by_sofa": by_sofa,
     }
+
+
+def physician_action_counts(df: pd.DataFrame) -> Dict[str, Any]:
+    return action_counts_summary(action_ids(df), df["SOFA"].to_numpy(), prefix="physician")
+
+
+def expert_action_counts(df: pd.DataFrame, expert_actions: np.ndarray, prefix: str) -> Dict[str, Any]:
+    return action_counts_summary(expert_actions, df["SOFA"].to_numpy(), prefix=prefix)
 
 
 def episode_start_indices(df: pd.DataFrame) -> np.ndarray:
@@ -199,6 +206,7 @@ def main() -> None:
     }
     metrics.update(mortality_summary(test_df))
     metrics.update(physician_action_counts(test_df))
+    metrics.update(expert_action_counts(test_df, greedy_actions, prefix="dddqn"))
 
     metrics_path = args.output_dir / "eval_metrics.json"
     metrics_path.write_text(json.dumps(metrics, indent=2))
