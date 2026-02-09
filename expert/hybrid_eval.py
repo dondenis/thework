@@ -26,6 +26,7 @@ NUM_ACTIONS = 25
 DEFAULT_GAMMA = 0.99
 DEFAULT_TAU = 0.25
 DEFAULT_DELTA = 0.0
+DEFAULT_OPE_EPSILON = 1e-4
 
 FEATURES_FOR_GATE = [
     "age",
@@ -129,10 +130,9 @@ def one_hot_actions(actions: np.ndarray) -> np.ndarray:
     return np.eye(NUM_ACTIONS, dtype=np.float32)[actions]
 
 
-def physician_action_counts(df: pd.DataFrame) -> Dict[str, Any]:
-    actions = action_ids(df)
+def action_counts_summary(actions: np.ndarray, sofa: np.ndarray, prefix: str) -> Dict[str, Any]:
     counts = np.bincount(actions, minlength=NUM_ACTIONS)[1:]
-    bins = sofa_bins(df["SOFA"].to_numpy())
+    bins = sofa_bins(sofa)
     by_sofa = {}
     for label, key in [("low", "low"), ("medium", "mid"), ("high", "high")]:
         mask = bins == label
@@ -142,9 +142,17 @@ def physician_action_counts(df: pd.DataFrame) -> Dict[str, Any]:
             bin_counts = np.bincount(actions[mask], minlength=NUM_ACTIONS)[1:]
             by_sofa[key] = bin_counts.astype(int).tolist()
     return {
-        "physician_action_counts_24": counts.astype(int).tolist(),
-        "physician_action_counts_24_by_sofa": by_sofa,
+        f"{prefix}_action_counts_24": counts.astype(int).tolist(),
+        f"{prefix}_action_counts_24_by_sofa": by_sofa,
     }
+
+
+def physician_action_counts(df: pd.DataFrame) -> Dict[str, Any]:
+    return action_counts_summary(action_ids(df), df["SOFA"].to_numpy(), prefix="physician")
+
+
+def expert_action_counts(df: pd.DataFrame, expert_actions: np.ndarray, prefix: str) -> Dict[str, Any]:
+    return action_counts_summary(expert_actions, df["SOFA"].to_numpy(), prefix=prefix)
 
 
 def build_transitions(
@@ -259,6 +267,41 @@ def clinician_action_mask(
     return np.array(masks, dtype=bool), float(np.mean(masked_rates))
 
 
+def softmax_probs(logits: np.ndarray, temperature: float) -> np.ndarray:
+    temperature = max(float(temperature), 1e-6)
+    scaled = logits / temperature
+    scaled -= np.max(scaled, axis=1, keepdims=True)
+    exp = np.exp(scaled)
+    return exp / np.sum(exp, axis=1, keepdims=True)
+
+
+def stabilize_policy_probs(policy_probs: np.ndarray, epsilon: float) -> np.ndarray:
+    probs = np.asarray(policy_probs, dtype=np.float64)
+    probs = np.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
+    probs = np.clip(probs, 0.0, 1.0)
+    probs = (1.0 - epsilon) * probs + (epsilon / probs.shape[1])
+    row_sums = probs.sum(axis=1, keepdims=True)
+    zero_rows = row_sums <= 0
+    row_sums[zero_rows] = 1.0
+    probs = probs / row_sums
+    if np.any(zero_rows):
+        probs[zero_rows[:, 0]] = 1.0 / probs.shape[1]
+    return probs.astype(np.float32)
+
+
+def probability_diagnostics(policy_probs: np.ndarray) -> Dict[str, float]:
+    row_sums = np.sum(policy_probs, axis=1)
+    finite_mask = np.isfinite(policy_probs).all()
+    return {
+        "policy_probs_min": float(np.min(policy_probs)),
+        "policy_probs_max": float(np.max(policy_probs)),
+        "policy_probs_row_sum_mean": float(np.mean(row_sums)),
+        "policy_probs_row_sum_min": float(np.min(row_sums)),
+        "policy_probs_row_sum_max": float(np.max(row_sums)),
+        "policy_probs_is_finite": float(bool(finite_mask)),
+    }
+
+
 def apply_action_mask(policy_probs: np.ndarray, mask: np.ndarray) -> np.ndarray:
     masked = np.where(mask, 0.0, policy_probs)
     row_sums = masked.sum(axis=1, keepdims=True)
@@ -306,6 +349,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delta", type=float, default=DEFAULT_DELTA)
     parser.add_argument("--gamma", type=float, default=DEFAULT_GAMMA)
     parser.add_argument("--mask-actions", action="store_true")
+    parser.add_argument("--ope-epsilon", type=float, default=DEFAULT_OPE_EPSILON)
+    parser.add_argument("--hard-gate", action="store_true", help="Use thresholded gate for MB weight (legacy)")
     return parser.parse_args()
 
 
@@ -368,15 +413,20 @@ def main() -> None:
     gate_x = gate_features(test_df, traj_lengths, max_dist)
     gate_x = (gate_x - np.array(gating["mean"])) / np.array(gating["std"])
 
-    gate_logits = gate_x @ np.array(gating["coef"]) + gating["intercept"]
+    gate_logits = np.clip(gate_x @ np.array(gating["coef"]) + gating["intercept"], -60.0, 60.0)
     gate_probs = 1.0 / (1.0 + np.exp(-gate_logits))
-    p_mb = np.where(gate_probs >= gating["threshold"], gate_probs, 0.0)
+    if args.hard_gate:
+        p_mb = np.where(gate_probs >= gating["threshold"], gate_probs, 0.0)
+    else:
+        p_mb = np.clip(gate_probs, 0.0, 1.0)
 
     q_hyb = (1.0 - p_mb[:, None]) * q_cql + p_mb[:, None] * q_mb
     q_hyb = np.nan_to_num(q_hyb, nan=0.0, posinf=0.0, neginf=0.0)
-    policy_probs = tf.nn.softmax(q_hyb / args.tau).numpy()
-    policy_probs = np.clip(policy_probs, 1e-6, 1.0)
-    policy_probs = policy_probs / policy_probs.sum(axis=1, keepdims=True)
+
+    pi_cql = softmax_probs(q_cql, args.tau)
+    pi_mb = softmax_probs(q_mb, args.tau)
+    policy_probs = (1.0 - p_mb[:, None]) * pi_cql + p_mb[:, None] * pi_mb
+    policy_probs = stabilize_policy_probs(policy_probs, epsilon=args.ope_epsilon)
 
     mask_rate = 0.0
     mask = np.zeros_like(policy_probs, dtype=bool)
@@ -385,6 +435,7 @@ def main() -> None:
             test_states, train_states, train_actions, k=args.neighbor_k
         )
         policy_probs = apply_action_mask(policy_probs, mask)
+        policy_probs = stabilize_policy_probs(policy_probs, epsilon=args.ope_epsilon)
 
     phwis = compute_phwis(build_phwis_episodes(test_df, policy_probs))
     phwdr = compute_phwdr(build_phwdr_episodes(test_df, policy_probs, q_hyb))
@@ -396,6 +447,10 @@ def main() -> None:
 
     q_diff = q_hyb - q_cql
     diagnostics = {
+        "hard_gate": float(args.hard_gate),
+        "ope_epsilon": float(args.ope_epsilon),
+        "p_mb_mean": float(np.mean(p_mb)),
+        "p_mb_std": float(np.std(p_mb)),
         "qhyb_minus_cql_mean": float(np.mean(q_diff)),
         "qhyb_minus_cql_std": float(np.std(q_diff)),
         "mask_rate": mask_rate,
@@ -405,7 +460,11 @@ def main() -> None:
         "phwdr": phwdr,
         "am": am,
     }
+    diagnostics.update(probability_diagnostics(policy_probs))
     diagnostics.update(physician_action_counts(test_df))
+    diagnostics.update(expert_action_counts(test_df, np.argmax(q_cql, axis=1), prefix="cql"))
+    diagnostics.update(expert_action_counts(test_df, np.argmax(q_mb, axis=1), prefix="mb"))
+    diagnostics.update(expert_action_counts(test_df, np.argmax(policy_probs, axis=1), prefix="hybrid"))
 
     metrics_path = args.hybrid_dir / "hybrid_eval_metrics.json"
     metrics_path.write_text(json.dumps(diagnostics, indent=2))
