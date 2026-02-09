@@ -46,7 +46,7 @@ df = pd.read_csv(DATA_PATH)
 #     if col in df.columns:
 #         df.rename(columns={col: alias}, inplace=True)
 
-# load 90-day mortality file
+# load in-hospital mortality cohort file
 sepsis_df = pd.read_csv(SEPSIS_PATH)
 
 
@@ -117,7 +117,9 @@ df = df.drop(columns=["hours_icu"], errors="ignore").merge(
 dfm = pd.read_csv("MIMICtable.csv")
 
 # --- use one row per ICU stay: take the max of each binary label over 4h rows ---
-labels = ["died_in_hosp", "died_within_48h_of_out_time", "mortality_90d"]
+labels = ["died_in_hosp", "died_within_48h_of_out_time"]
+if "mortality_90d" in dfm.columns:
+    labels.append("mortality_90d")
 for c in labels:
     dfm[c] = pd.to_numeric(dfm[c], errors="coerce").fillna(0).clip(0, 1)
 
@@ -136,14 +138,15 @@ def summarize(col, pretty_name):
 
 summarize("died_within_48h_of_out_time", "48-hours after ICU")
 summarize("died_in_hosp", "Hospital mortality")
-summarize("mortality_90d", "90-d mortality")
+if "mortality_90d" in by_stay.columns:
+    summarize("mortality_90d", "90-d mortality")
 
 
 # %% [markdown]
 # ### Cohort table
 
 # %%
-# JUPYTER CELL — 2) Cohort Table (now using 90-day mortality)  (ROUNDED TO 1 DECIMAL)
+# JUPYTER CELL — 2) Cohort Table (in-hospital objective)  (ROUNDED TO 1 DECIMAL)
 
 def cohort_summary_hosp(table: pd.DataFrame) -> pd.DataFrame:
     out = []
@@ -169,7 +172,7 @@ cohort_tbl_hosp
 
 # %%
 for c in ["bloc","gender","age","mechvent","max_dose_vaso",
-          "died_in_hosp","mortality_90d","died_within_48h_of_out_time"]:
+          "died_in_hosp","died_within_48h_of_out_time","mortality_90d"]:
     if c in dfm.columns:
         dfm[c] = pd.to_numeric(dfm[c], errors="coerce")
 
@@ -181,7 +184,7 @@ min_bloc  = g.groupby("icustayid")["bloc"].min()
 
 agg = g.groupby("icustayid").agg(
     died_in_hosp=("died_in_hosp","max"),
-    mort90=("mortality_90d","max"),
+    
     died48h=("died_within_48h_of_out_time","max"),
     mechvent_any=("mechvent","max"),
     max_dose_vaso_max=("max_dose_vaso","max"),
@@ -259,9 +262,6 @@ rows.append(("Death within 48h of ICU out-time", f"{p48:.1f}%", f"n={n48}"))
 hn, hp = n_pct(per_stay["died_in_hosp"] == 1)
 rows.append(("Hospital mortality", f"{hp:.1f}%", f"n={hn}"))
 
-# 90-d mortality
-n90, p90 = n_pct(per_stay["mort90"] == 1)
-rows.append(("90-d mortality", f"{p90:.1f}%", f"n={n90}"))
 
 table = pd.DataFrame(rows, columns=["Characteristic", "Value", "Bracket/Note"])
 print(table.to_string(index=False))
@@ -295,7 +295,11 @@ desc
 # JUPYTER CELL — 4) Class Balance & Basic Distributions (use inhosp)  (ADJUSTED)
 mortality_rate_hosp = dfm["died_in_hosp"].mean()
 n_stays = dfm["icustayid"].nunique()
-print(f"90-day mortality rate: {mortality_rate_hosp:.3f} (N stays={n_stays})")
+print(f"In-hospital mortality rate: {mortality_rate_hosp:.3f} (N stays={n_stays})")
+if "reward" in dfm.columns:
+    per_stay_reward = dfm.sort_values(["icustayid", "bloc"]).groupby("icustayid")["reward"].last()
+    terminal_death_rate = (pd.to_numeric(per_stay_reward, errors="coerce") < 0).mean()
+    print(f"Terminal reward-derived mortality rate: {terminal_death_rate:.3f}")
 by_stay_age = (dfm.groupby("icustayid")["age"]
              .mean()                      # any 1 across rows -> 1 for that stay
              .astype(int) / 365.25

@@ -61,11 +61,11 @@ print("Val shape:", val_df.shape)
 print("Test shape:", test_df.shape)
 
 # Descriptive statistics for key columns
-key_cols = ["reward", "SOFA", "iv_input", "vaso_input", "mortality_90d"]
+key_cols = ["reward", "SOFA", "iv_input", "vaso_input", "died_in_hosp"]
 print(train_df[key_cols].describe(include="all"))
 
 # %%
-# Mortality summaries by SOFA bucket (train/val/test)
+#! In-hospital + terminal-reward survivability summaries by SOFA bucket (train/val/test)
 !PYTHONPATH=$REPO_DIR python explore_dataset_mortality.py --data-dir data
 
 # %% [markdown]

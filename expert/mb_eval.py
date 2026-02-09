@@ -161,7 +161,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--test-csv",
         type=str,
-        default="rl_test_data_final_cont_noterm.csv",
+        default="rl_test_data_final_cont.csv",
     )
     parser.add_argument(
         "--output-dir",

@@ -107,7 +107,7 @@ def episode_start_indices(df: pd.DataFrame) -> np.ndarray:
 
 
 def mortality_summary(df: pd.DataFrame) -> Dict[str, float]:
-    mortality = df["mortality_90d"].astype(float)
+    mortality = df["died_in_hosp"].astype(float)
     bins = sofa_bins(df["SOFA"].to_numpy())
 
     summary = {
@@ -136,7 +136,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--test-csv",
         type=str,
-        default="rl_test_data_final_cont_noterm.csv",
+        default="rl_test_data_final_cont.csv",
     )
     parser.add_argument(
         "--model-dir",

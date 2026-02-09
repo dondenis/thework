@@ -26,6 +26,8 @@ import pandas as pd
 NUM_ACTIONS = 25
 DEFAULT_GAMMA = 0.99
 SMOOTHING = 1e-6
+EVAL_EPSILON = 1e-4
+MAX_IMPORTANCE_RATIO = 100.0
 
 
 @dataclass
@@ -58,12 +60,27 @@ def behavior_policy(actions: np.ndarray, num_actions: int = NUM_ACTIONS) -> np.n
     return probs
 
 
+def sanitize_eval_policy_probs(eval_policy_probs: np.ndarray, epsilon: float = EVAL_EPSILON) -> np.ndarray:
+    probs = np.asarray(eval_policy_probs, dtype=float)
+    probs = np.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
+    probs = np.clip(probs, 0.0, 1.0)
+    probs = (1.0 - epsilon) * probs + (epsilon / probs.shape[1])
+    row_sums = probs.sum(axis=1, keepdims=True)
+    zero_rows = row_sums <= 0
+    row_sums[zero_rows] = 1.0
+    probs = probs / row_sums
+    if np.any(zero_rows):
+        probs[zero_rows[:, 0]] = 1.0 / probs.shape[1]
+    return probs
+
+
 def build_episodes(
     df: pd.DataFrame,
     eval_policy_probs: np.ndarray,
 ) -> List[EpisodeData]:
     actions = action_ids(df)
     beh_probs = behavior_policy(actions)
+    eval_policy_probs = sanitize_eval_policy_probs(eval_policy_probs)
 
     episodes: List[EpisodeData] = []
     start = 0
@@ -90,7 +107,11 @@ def build_episodes(
 # %%
 # ## PHWIS estimator
 
-def compute_phwis(episodes: List[EpisodeData], gamma: float = DEFAULT_GAMMA) -> float:
+def compute_phwis(
+    episodes: List[EpisodeData],
+    gamma: float = DEFAULT_GAMMA,
+    max_importance_ratio: float = MAX_IMPORTANCE_RATIO,
+) -> float:
     max_len = max(len(ep.actions) for ep in episodes)
     estimate = 0.0
 
@@ -100,8 +121,9 @@ def compute_phwis(episodes: List[EpisodeData], gamma: float = DEFAULT_GAMMA) -> 
         for ep in episodes:
             if t >= len(ep.actions):
                 continue
-            ratios = ep.eval_probs[: t + 1, ep.actions[: t + 1]] / ep.beh_probs[: t + 1]
-            rho_t = float(np.prod(ratios))
+            ratios = ep.eval_probs[: t + 1, ep.actions[: t + 1]] / np.clip(ep.beh_probs[: t + 1], SMOOTHING, 1.0)
+            ratios = np.clip(ratios, 0.0, max_importance_ratio)
+            rho_t = float(np.exp(np.sum(np.log(np.clip(ratios, SMOOTHING, None)))))
             rhos.append(rho_t)
             rewards_t.append(ep.rewards[t])
 
