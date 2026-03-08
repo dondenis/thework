@@ -30,6 +30,27 @@ EVAL_EPSILON = 1e-4
 MAX_IMPORTANCE_RATIO = 100.0
 
 
+def _normalized_weights_from_log(log_weights: np.ndarray) -> np.ndarray:
+    """Numerically stable normalization of (possibly huge) importance log-weights."""
+    lw = np.asarray(log_weights, dtype=float)
+    lw = np.nan_to_num(lw, nan=-np.inf, posinf=np.inf, neginf=-np.inf)
+
+    finite = np.isfinite(lw)
+    if not np.any(finite):
+        return np.full_like(lw, 1.0 / len(lw), dtype=float)
+
+    max_lw = np.max(lw[finite])
+    shifted = lw - max_lw
+    shifted = np.clip(shifted, -745.0, 50.0)  # keep exp in finite range
+    expw = np.exp(shifted)
+    expw[~finite] = 0.0
+
+    denom = np.sum(expw)
+    if not np.isfinite(denom) or denom <= 0:
+        return np.full_like(expw, 1.0 / len(expw), dtype=float)
+    return expw / denom
+
+
 @dataclass
 class EpisodeData:
     actions: np.ndarray
@@ -116,28 +137,22 @@ def compute_phwis(
     estimate = 0.0
 
     for t in range(max_len):
-        rhos = []
+        log_rhos = []
         rewards_t = []
         for ep in episodes:
             if t >= len(ep.actions):
                 continue
             ratios = ep.eval_probs[: t + 1, ep.actions[: t + 1]] / np.clip(ep.beh_probs[: t + 1], SMOOTHING, 1.0)
             ratios = np.clip(ratios, 0.0, max_importance_ratio)
-            rho_t = float(np.exp(np.sum(np.log(np.clip(ratios, SMOOTHING, None)))))
-            rhos.append(rho_t)
+            log_rho_t = float(np.sum(np.log(np.clip(ratios, SMOOTHING, None))))
+            log_rhos.append(log_rho_t)
             rewards_t.append(ep.rewards[t])
 
-        if not rhos:
+        if not log_rhos:
             continue
 
-        rhos = np.asarray(rhos, dtype=float)
-        rhos = np.nan_to_num(rhos, nan=0.0, posinf=0.0, neginf=0.0)
-        denom = np.sum(rhos)
-        if denom <= 0 or np.isnan(denom):
-            weights = np.full_like(rhos, 1.0 / len(rhos))
-        else:
-            weights = rhos / denom
-        estimate += (gamma**t) * float(np.sum(weights * np.asarray(rewards_t)))
+        weights = _normalized_weights_from_log(np.asarray(log_rhos, dtype=float))
+        estimate += (gamma**t) * float(np.sum(weights * np.asarray(rewards_t, dtype=float)))
 
     return float(estimate)
 
