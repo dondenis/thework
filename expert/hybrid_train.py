@@ -230,8 +230,8 @@ def ppo_rollout(
     states: np.ndarray,
     gamma: float,
     rollout_horizon: int,
+    rng: np.random.Generator,
 ) -> Dict[str, np.ndarray]:
-    rng = np.random.default_rng(0)
     batch_states = []
     batch_actions = []
     batch_logprobs = []
@@ -301,9 +301,8 @@ def ppo_update(
     batch: Dict[str, np.ndarray],
     clip_ratio: float,
     epochs: int,
+    optimizer: tf.keras.optimizers.Optimizer,
 ) -> float:
-    optimizer = tf.keras.optimizers.Adam(3e-4)
-
     for _ in range(epochs):
         with tf.GradientTape() as tape:
             logits = policy(batch["states"])
@@ -635,6 +634,8 @@ def main() -> None:
     best_median = -np.inf
     no_improve = 0
     last_diag = None
+    ppo_optimizer = tf.keras.optimizers.Adam(3e-4)
+    rollout_rng = np.random.default_rng(0)
 
     for step in range(0, args.ppo_steps, args.ppo_rollout_horizon):
         sample_idx = np.random.choice(len(train_states), size=32, replace=False)
@@ -645,6 +646,7 @@ def main() -> None:
             train_states[sample_idx],
             gamma=args.gamma,
             rollout_horizon=args.ppo_rollout_horizon,
+            rng=rollout_rng,
         )
         loss = ppo_update(
             policy,
@@ -652,6 +654,7 @@ def main() -> None:
             batch,
             clip_ratio=args.ppo_clip,
             epochs=args.ppo_epochs,
+            optimizer=ppo_optimizer,
         )
 
         if step % 2000 == 0:

@@ -1,4 +1,4 @@
-"""Train a Dueling Double DQN (DDDQN) policy on the preprocessed dataset."""
+"""Train a DDQN policy aligned with CQL setup but without the conservative term."""
 from __future__ import annotations
 
 import argparse
@@ -16,6 +16,8 @@ DEFAULT_BATCH_SIZE = 256
 DEFAULT_STEPS = 20000
 DEFAULT_TAU = 0.005
 DEFAULT_LR = 1e-4
+REWARD_THRESHOLD = 20.0
+REG_LAMBDA = 5.0
 
 
 def repo_root() -> Path:
@@ -71,17 +73,31 @@ def build_transitions(
 class DuelingDDQN(tf.keras.Model):
     def __init__(self, input_dim: int, num_actions: int) -> None:
         super().__init__()
-        self.shared_1 = tf.keras.layers.Dense(128)
-        self.shared_2 = tf.keras.layers.Dense(128)
-        self.value = tf.keras.layers.Dense(1)
-        self.advantage = tf.keras.layers.Dense(num_actions)
+        self.fc1 = tf.keras.layers.Dense(128, use_bias=False)
+        self.bn1 = tf.keras.layers.BatchNormalization(center=True, scale=True)
+        self.act1 = tf.keras.layers.LeakyReLU(alpha=0.01)
 
-    def call(self, inputs: tf.Tensor) -> tf.Tensor:
-        x = tf.nn.leaky_relu(self.shared_1(inputs))
-        x = tf.nn.leaky_relu(self.shared_2(x))
-        value = self.value(x)
-        advantage = self.advantage(x)
-        return value + (advantage - tf.reduce_mean(advantage, axis=1, keepdims=True))
+        self.fc2 = tf.keras.layers.Dense(128, use_bias=False)
+        self.bn2 = tf.keras.layers.BatchNormalization(center=True, scale=True)
+        self.act2 = tf.keras.layers.LeakyReLU(alpha=0.01)
+
+        kinit = tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.05)
+        self.adv_head = tf.keras.layers.Dense(num_actions, kernel_initializer=kinit)
+        self.val_head = tf.keras.layers.Dense(1, kernel_initializer=kinit)
+
+    def call(self, x: tf.Tensor, training: bool = False) -> tf.Tensor:
+        x = self.fc1(x)
+        x = self.bn1(x, training=training)
+        x = self.act1(x)
+
+        x = self.fc2(x)
+        x = self.bn2(x, training=training)
+        x = self.act2(x)
+
+        stream_a, stream_v = tf.split(x, num_or_size_splits=2, axis=-1)
+        adv = self.adv_head(stream_a)
+        val = self.val_head(stream_v)
+        return val + (adv - tf.reduce_mean(adv, axis=1, keepdims=True))
 
 
 def soft_update(target: tf.keras.Model, source: tf.keras.Model, tau: float) -> None:
@@ -90,28 +106,16 @@ def soft_update(target: tf.keras.Model, source: tf.keras.Model, tau: float) -> N
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train DDDQN policy")
-    parser.add_argument(
-        "--data-dir",
-        type=Path,
-        default=repo_root() / "data",
-        help="Path to data directory",
-    )
-    parser.add_argument(
-        "--train-csv",
-        type=str,
-        default="rl_train_data_final_cont.csv",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=repo_root() / "outputs" / "dddqn",
-    )
+    parser = argparse.ArgumentParser(description="Train DDQN policy")
+    parser.add_argument("--data-dir", type=Path, default=repo_root() / "data")
+    parser.add_argument("--train-csv", type=str, default="rl_train_data_final_cont.csv")
+    parser.add_argument("--output-dir", type=Path, default=repo_root() / "outputs" / "dddqn")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--steps", type=int, default=DEFAULT_STEPS)
     parser.add_argument("--gamma", type=float, default=DEFAULT_GAMMA)
     parser.add_argument("--tau", type=float, default=DEFAULT_TAU)
     parser.add_argument("--lr", type=float, default=DEFAULT_LR)
+    parser.add_argument("--debug-every", type=int, default=1000)
     return parser.parse_args()
 
 
@@ -119,18 +123,22 @@ def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # NOTE: To run on Colab (T4 GPU), mount Drive and set --data-dir/--output-dir
-    # to your Drive paths (e.g., /content/drive/MyDrive/sepsisrl/data).
-
     state_features = load_state_features(args.data_dir)
     train_df = pd.read_csv(args.data_dir / args.train_csv)
+    states, actions, rewards, next_states, dones = build_transitions(train_df, state_features)
 
-    states, actions, rewards, next_states, dones = build_transitions(
-        train_df, state_features
+    if len(states) == 0:
+        raise ValueError("No valid rows remain after dropping missing required fields.")
+    print(
+        f"[debug] dataset rows={len(states)} "
+        f"actions_range=({actions.min()},{actions.max()}) "
+        f"reward_range=({rewards.min():.3f},{rewards.max():.3f})"
     )
 
     main_model = DuelingDDQN(states.shape[1], NUM_ACTIONS)
     target_model = DuelingDDQN(states.shape[1], NUM_ACTIONS)
+    _ = main_model(tf.zeros((1, states.shape[1]), dtype=tf.float32))
+    _ = target_model(tf.zeros((1, states.shape[1]), dtype=tf.float32))
 
     optimizer = tf.keras.optimizers.Adam(learning_rate=args.lr)
     mse = tf.keras.losses.MeanSquaredError()
@@ -144,15 +152,20 @@ def main() -> None:
         batch_dones: tf.Tensor,
     ) -> tf.Tensor:
         with tf.GradientTape() as tape:
-            q_next_main = main_model(batch_next_states)
+            q_next_main = main_model(batch_next_states, training=False)
             next_actions = tf.argmax(q_next_main, axis=1)
-            q_next_target = target_model(batch_next_states)
+            q_next_target = target_model(batch_next_states, training=False)
             q_next = tf.gather(q_next_target, next_actions, batch_dims=1)
+            q_next = tf.clip_by_value(q_next, -REWARD_THRESHOLD, REWARD_THRESHOLD)
             targets = batch_rewards + args.gamma * (1.0 - batch_dones) * q_next
 
-            q_values = main_model(batch_states)
+            q_values = main_model(batch_states, training=True)
             q_selected = tf.gather(q_values, batch_actions, batch_dims=1)
-            loss = mse(targets, q_selected)
+            td_loss = mse(targets, q_selected)
+
+            reg_vector = tf.nn.relu(tf.abs(q_selected) - REWARD_THRESHOLD)
+            reg_term = tf.reduce_sum(reg_vector)
+            loss = td_loss + REG_LAMBDA * reg_term
 
         gradients = tape.gradient(loss, main_model.trainable_variables)
         optimizer.apply_gradients(zip(gradients, main_model.trainable_variables))
@@ -168,17 +181,24 @@ def main() -> None:
         batch_next_states = tf.convert_to_tensor(next_states[idx])
         batch_dones = tf.convert_to_tensor(dones[idx])
 
-        loss = train_step(
-            batch_states,
-            batch_actions,
-            batch_rewards,
-            batch_next_states,
-            batch_dones,
-        )
+        loss = train_step(batch_states, batch_actions, batch_rewards, batch_next_states, batch_dones)
         soft_update(target_model, main_model, args.tau)
 
-        if step % 1000 == 0:
-            print(f"Step {step}: loss={loss.numpy():.6f}")
+        if step % args.debug_every == 0:
+            q_now = main_model(batch_states, training=False)
+            q_min = float(tf.reduce_min(q_now).numpy())
+            q_max = float(tf.reduce_max(q_now).numpy())
+            rewards_min = float(tf.reduce_min(batch_rewards).numpy())
+            rewards_max = float(tf.reduce_max(batch_rewards).numpy())
+            loss_val = float(loss.numpy())
+            print(
+                f"Step {step}: loss={loss_val:.6f} "
+                f"q_range=({q_min:.3f},{q_max:.3f}) "
+                f"reward_range=({rewards_min:.3f},{rewards_max:.3f})"
+            )
+            if np.isnan(loss_val):
+                print("[debug] Loss is NaN. Stopping for inspection.")
+                break
 
     model_path = args.output_dir / "model.weights.h5"
     main_model.save_weights(model_path)
@@ -191,6 +211,8 @@ def main() -> None:
         "gamma": args.gamma,
         "tau": args.tau,
         "lr": args.lr,
+        "aligned_with_cql": True,
+        "conservative_term": False,
     }
     (args.output_dir / "train_metadata.json").write_text(json.dumps(metadata, indent=2))
     print(f"Saved model weights to {model_path}")

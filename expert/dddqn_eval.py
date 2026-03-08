@@ -44,17 +44,31 @@ def softmax(logits: np.ndarray, temperature: float) -> np.ndarray:
 class DuelingDDQN(tf.keras.Model):
     def __init__(self, input_dim: int, num_actions: int) -> None:
         super().__init__()
-        self.shared_1 = tf.keras.layers.Dense(128)
-        self.shared_2 = tf.keras.layers.Dense(128)
-        self.value = tf.keras.layers.Dense(1)
-        self.advantage = tf.keras.layers.Dense(num_actions)
+        self.fc1 = tf.keras.layers.Dense(128, use_bias=False)
+        self.bn1 = tf.keras.layers.BatchNormalization(center=True, scale=True)
+        self.act1 = tf.keras.layers.LeakyReLU(alpha=0.01)
 
-    def call(self, inputs: tf.Tensor) -> tf.Tensor:
-        x = tf.nn.leaky_relu(self.shared_1(inputs))
-        x = tf.nn.leaky_relu(self.shared_2(x))
-        value = self.value(x)
-        advantage = self.advantage(x)
-        return value + (advantage - tf.reduce_mean(advantage, axis=1, keepdims=True))
+        self.fc2 = tf.keras.layers.Dense(128, use_bias=False)
+        self.bn2 = tf.keras.layers.BatchNormalization(center=True, scale=True)
+        self.act2 = tf.keras.layers.LeakyReLU(alpha=0.01)
+
+        kinit = tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.05)
+        self.adv_head = tf.keras.layers.Dense(num_actions, kernel_initializer=kinit)
+        self.val_head = tf.keras.layers.Dense(1, kernel_initializer=kinit)
+
+    def call(self, x: tf.Tensor, training: bool = False) -> tf.Tensor:
+        x = self.fc1(x)
+        x = self.bn1(x, training=training)
+        x = self.act1(x)
+
+        x = self.fc2(x)
+        x = self.bn2(x, training=training)
+        x = self.act2(x)
+
+        stream_a, stream_v = tf.split(x, num_or_size_splits=2, axis=-1)
+        adv = self.adv_head(stream_a)
+        val = self.val_head(stream_v)
+        return val + (adv - tf.reduce_mean(adv, axis=1, keepdims=True))
 
 
 def compute_policy_outputs(
@@ -80,19 +94,21 @@ def action_ids(df: pd.DataFrame) -> np.ndarray:
 
 
 def action_counts_summary(actions: np.ndarray, sofa: np.ndarray, prefix: str) -> Dict[str, Any]:
-    counts = np.bincount(actions, minlength=NUM_ACTIONS)[1:]
+    counts = np.bincount(actions, minlength=NUM_ACTIONS)
     bins = sofa_bins(sofa)
     by_sofa = {}
     for label, key in [("low", "low"), ("medium", "mid"), ("high", "high")]:
         mask = bins == label
         if not np.any(mask):
-            by_sofa[key] = [0] * (NUM_ACTIONS - 1)
+            by_sofa[key] = [0] * NUM_ACTIONS
         else:
-            bin_counts = np.bincount(actions[mask], minlength=NUM_ACTIONS)[1:]
+            bin_counts = np.bincount(actions[mask], minlength=NUM_ACTIONS)
             by_sofa[key] = bin_counts.astype(int).tolist()
+    counts_list = counts.astype(int).tolist()
+    by_sofa = {k: np.asarray(v, dtype=int).tolist() for k, v in by_sofa.items()}
     return {
-        f"{prefix}_action_counts_24": counts.astype(int).tolist(),
-        f"{prefix}_action_counts_24_by_sofa": by_sofa,
+        f"{prefix}_action_counts_25": counts_list,
+        f"{prefix}_action_counts_25_by_sofa": by_sofa,
     }
 
 
