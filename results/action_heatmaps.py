@@ -16,6 +16,11 @@ def plot_heatmap(counts: np.ndarray, title: str, path: Path) -> None:
     ax.set_title(title)
     ax.set_xlabel("vaso bin")
     ax.set_ylabel("iv bin")
+    for iv_bin in range(counts.shape[0]):
+        for vaso_bin in range(counts.shape[1]):
+            count = int(counts[iv_bin, vaso_bin])
+            color = "white" if count > (np.max(counts) * 0.5) else "black"
+            ax.text(vaso_bin, iv_bin, str(count), ha="center", va="center", color=color, fontsize=7)
     fig.colorbar(im, ax=ax)
     fig.tight_layout()
     fig.savefig(path)
@@ -66,7 +71,25 @@ def main() -> None:
 
         df = pd.DataFrame(counts, columns=[f"vaso_{i}" for i in range(5)])
         df.insert(0, "iv_bin", list(range(5)))
+        df["row_total"] = df[[f"vaso_{i}" for i in range(5)]].sum(axis=1)
         df.to_csv(results_dir / f"action_counts_{policy}.csv", index=False)
+
+        long_counts = []
+        for iv_bin in range(5):
+            for vaso_bin in range(5):
+                action_id = iv_bin * 5 + vaso_bin
+                long_counts.append(
+                    {
+                        "action_id": action_id,
+                        "iv_bin": iv_bin,
+                        "vaso_bin": vaso_bin,
+                        "count": int(counts[iv_bin, vaso_bin]),
+                        "is_no_iv_no_vaso": bool(action_id == 0),
+                    }
+                )
+        pd.DataFrame(long_counts).to_csv(
+            results_dir / f"action_counts_{policy}_long.csv", index=False
+        )
 
     if missing:
         print("[warn] Missing policy output files (run expert/* with --train_or_load --eval_split first):")

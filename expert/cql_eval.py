@@ -95,19 +95,21 @@ def action_ids(df: pd.DataFrame) -> np.ndarray:
 
 
 def action_counts_summary(actions: np.ndarray, sofa: np.ndarray, prefix: str) -> Dict[str, Any]:
-    counts = np.bincount(actions, minlength=NUM_ACTIONS)[1:]
+    counts = np.bincount(actions, minlength=NUM_ACTIONS)
     bins = sofa_bins(sofa)
     by_sofa = {}
     for label, key in [("low", "low"), ("medium", "mid"), ("high", "high")]:
         mask = bins == label
         if not np.any(mask):
-            by_sofa[key] = [0] * (NUM_ACTIONS - 1)
+            by_sofa[key] = [0] * NUM_ACTIONS
         else:
-            bin_counts = np.bincount(actions[mask], minlength=NUM_ACTIONS)[1:]
+            bin_counts = np.bincount(actions[mask], minlength=NUM_ACTIONS)
             by_sofa[key] = bin_counts.astype(int).tolist()
+    counts_list = counts.astype(int).tolist()
+    by_sofa = {k: np.asarray(v, dtype=int).tolist() for k, v in by_sofa.items()}
     return {
-        f"{prefix}_action_counts_24": counts.astype(int).tolist(),
-        f"{prefix}_action_counts_24_by_sofa": by_sofa,
+        f"{prefix}_action_counts_25": counts_list,
+        f"{prefix}_action_counts_25_by_sofa": by_sofa,
     }
 
 

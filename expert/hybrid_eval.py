@@ -131,19 +131,21 @@ def one_hot_actions(actions: np.ndarray) -> np.ndarray:
 
 
 def action_counts_summary(actions: np.ndarray, sofa: np.ndarray, prefix: str) -> Dict[str, Any]:
-    counts = np.bincount(actions, minlength=NUM_ACTIONS)[1:]
+    counts = np.bincount(actions, minlength=NUM_ACTIONS)
     bins = sofa_bins(sofa)
     by_sofa = {}
     for label, key in [("low", "low"), ("medium", "mid"), ("high", "high")]:
         mask = bins == label
         if not np.any(mask):
-            by_sofa[key] = [0] * (NUM_ACTIONS - 1)
+            by_sofa[key] = [0] * NUM_ACTIONS
         else:
-            bin_counts = np.bincount(actions[mask], minlength=NUM_ACTIONS)[1:]
+            bin_counts = np.bincount(actions[mask], minlength=NUM_ACTIONS)
             by_sofa[key] = bin_counts.astype(int).tolist()
+    counts_list = counts.astype(int).tolist()
+    by_sofa = {k: np.asarray(v, dtype=int).tolist() for k, v in by_sofa.items()}
     return {
-        f"{prefix}_action_counts_24": counts.astype(int).tolist(),
-        f"{prefix}_action_counts_24_by_sofa": by_sofa,
+        f"{prefix}_action_counts_25": counts_list,
+        f"{prefix}_action_counts_25_by_sofa": by_sofa,
     }
 
 
@@ -415,10 +417,11 @@ def main() -> None:
 
     gate_logits = np.clip(gate_x @ np.array(gating["coef"]) + gating["intercept"], -60.0, 60.0)
     gate_probs = 1.0 / (1.0 + np.exp(-gate_logits))
+    thresholded = np.where(gate_probs >= gating["threshold"], gate_probs, 0.0)
     if args.hard_gate:
-        p_mb = np.where(gate_probs >= gating["threshold"], gate_probs, 0.0)
+        p_mb = np.where(gate_probs >= gating["threshold"], 1.0, 0.0)
     else:
-        p_mb = np.clip(gate_probs, 0.0, 1.0)
+        p_mb = np.clip(thresholded, 0.0, 1.0)
 
     q_hyb = (1.0 - p_mb[:, None]) * q_cql + p_mb[:, None] * q_mb
     q_hyb = np.nan_to_num(q_hyb, nan=0.0, posinf=0.0, neginf=0.0)
