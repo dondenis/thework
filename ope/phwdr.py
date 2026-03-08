@@ -27,6 +27,27 @@ EVAL_EPSILON = 1e-4
 MAX_IMPORTANCE_RATIO = 100.0
 
 
+def _normalized_weights_from_log(log_weights: np.ndarray) -> np.ndarray:
+    """Numerically stable normalization of (possibly huge) importance log-weights."""
+    lw = np.asarray(log_weights, dtype=float)
+    lw = np.nan_to_num(lw, nan=-np.inf, posinf=np.inf, neginf=-np.inf)
+
+    finite = np.isfinite(lw)
+    if not np.any(finite):
+        return np.full_like(lw, 1.0 / len(lw), dtype=float)
+
+    max_lw = np.max(lw[finite])
+    shifted = lw - max_lw
+    shifted = np.clip(shifted, -745.0, 50.0)  # keep exp in finite range
+    expw = np.exp(shifted)
+    expw[~finite] = 0.0
+
+    denom = np.sum(expw)
+    if not np.isfinite(denom) or denom <= 0:
+        return np.full_like(expw, 1.0 / len(expw), dtype=float)
+    return expw / denom
+
+
 @dataclass
 class EpisodeData:
     actions: np.ndarray
@@ -115,7 +136,7 @@ def compute_phwdr(
     num_episodes = len(episodes)
 
     for t in range(max_len):
-        rhos = []
+        log_rhos = []
         q_sa = []
         v_s = []
         rewards_t = []
@@ -125,44 +146,31 @@ def compute_phwdr(
                 continue
             ratios = ep.eval_probs[: t + 1, ep.actions[: t + 1]] / np.clip(ep.beh_probs[: t + 1], SMOOTHING, 1.0)
             ratios = np.clip(ratios, 0.0, max_importance_ratio)
-            rho_t = float(np.exp(np.sum(np.log(np.clip(ratios, SMOOTHING, None)))))
-            rhos.append(rho_t)
+            log_rhos.append(float(np.sum(np.log(np.clip(ratios, SMOOTHING, None)))))
             rewards_t.append(ep.rewards[t])
             q_sa.append(ep.q_values[t, ep.actions[t]])
             v_s.append(float(np.sum(ep.eval_probs[t] * ep.q_values[t])))
             active_episodes.append(ep)
 
-        if not rhos:
+        if not log_rhos:
             continue
 
-        rhos = np.asarray(rhos, dtype=float)
-        rhos = np.nan_to_num(rhos, nan=0.0, posinf=0.0, neginf=0.0)
-        denom = np.sum(rhos)
-        if denom <= 0 or np.isnan(denom):
-            weights = np.full_like(rhos, 1.0 / len(rhos))
-        else:
-            weights = rhos / denom
+        weights = _normalized_weights_from_log(np.asarray(log_rhos, dtype=float))
         prev_weights = (
-            np.full_like(weights, 1.0 / num_episodes) if t == 0 else None
+            np.full_like(weights, 1.0 / num_episodes, dtype=float) if t == 0 else None
         )
 
         if t > 0:
-            prev_rhos = []
+            prev_log_rhos = []
             for ep in active_episodes:
                 ratios = ep.eval_probs[:t, ep.actions[:t]] / np.clip(ep.beh_probs[:t], SMOOTHING, 1.0)
                 ratios = np.clip(ratios, 0.0, max_importance_ratio)
-                prev_rhos.append(float(np.exp(np.sum(np.log(np.clip(ratios, SMOOTHING, None))))))
-            prev_rhos = np.asarray(prev_rhos, dtype=float)
-            prev_rhos = np.nan_to_num(prev_rhos, nan=0.0, posinf=0.0, neginf=0.0)
-            prev_denom = np.sum(prev_rhos)
-            if prev_denom <= 0 or np.isnan(prev_denom):
-                prev_weights = np.full_like(prev_rhos, 1.0 / len(prev_rhos))
-            else:
-                prev_weights = prev_rhos / prev_denom
+                prev_log_rhos.append(float(np.sum(np.log(np.clip(ratios, SMOOTHING, None)))))
+            prev_weights = _normalized_weights_from_log(np.asarray(prev_log_rhos, dtype=float))
 
-        rewards_t = np.asarray(rewards_t)
-        q_sa = np.asarray(q_sa)
-        v_s = np.asarray(v_s)
+        rewards_t = np.asarray(rewards_t, dtype=float)
+        q_sa = np.asarray(q_sa, dtype=float)
+        v_s = np.asarray(v_s, dtype=float)
 
         estimate += (gamma**t) * float(
             np.sum(weights * rewards_t)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -124,6 +124,110 @@ def resolve_params(cfg: Config, policy: str, hparams_path: Optional[str]) -> Dic
     return params
 
 
+def run_real_hybrid_eval(cfg: Config, split: str) -> Dict[str, np.ndarray]:
+    import tensorflow as tf
+
+    from expert.hybrid_eval import (
+        DEFAULT_DELTA,
+        DEFAULT_GAMMA,
+        DEFAULT_OPE_EPSILON,
+        DEFAULT_TAU,
+        DuelingQNetwork,
+        DynamicsModel,
+        NUM_ACTIONS,
+        PolicyNet,
+        ValueNet,
+        action_ids,
+        build_transitions,
+        compute_q_mb,
+        compute_traj_lengths,
+        gate_features,
+        max_neighbor_distance,
+        softmax_probs,
+        stabilize_policy_probs,
+    )
+
+    paths = cfg.paths
+    split_path = Path(paths[f"{split}_csv"])
+    train_path = Path(paths["train_csv"])
+    state_features = Path(paths["state_features"]).read_text().split()
+
+    train_df = pd.read_csv(train_path)
+    eval_df = pd.read_csv(split_path)
+
+    train_states = train_df[state_features].to_numpy(dtype=np.float32)
+    test_states, _, _, _, _ = build_transitions(eval_df, state_features)
+
+    cql_weights = Path(paths.get("cql_weights", "outputs/cql/model.weights.h5"))
+    hybrid_dir = Path(paths.get("hybrid_dir", "outputs/hybrid"))
+
+    hybrid_hparams = cfg.data.get("hyperparams", {}).get("hybrid", {})
+    tau = float(hybrid_hparams.get("tau", DEFAULT_TAU))
+    delta = float(hybrid_hparams.get("delta", DEFAULT_DELTA))
+    gamma = float(hybrid_hparams.get("gamma", DEFAULT_GAMMA))
+    neighbor_k = int(hybrid_hparams.get("neighbor_k", 10))
+    ope_epsilon = float(cfg.data.get("reporting", {}).get("ope_epsilon", DEFAULT_OPE_EPSILON))
+
+    cql_model = DuelingQNetwork(test_states.shape[1], NUM_ACTIONS)
+    _ = cql_model(test_states[:1])
+    cql_model.load_weights(cql_weights)
+    q_cql = np.nan_to_num(cql_model(test_states).numpy(), nan=0.0, posinf=0.0, neginf=0.0)
+
+    dynamics_dir = hybrid_dir / "dynamics"
+    dyn_models = []
+    dyn_input_dim = test_states.shape[1] + NUM_ACTIONS
+    dyn_output_dim = test_states.shape[1] + 1
+    for weight_file in sorted(dynamics_dir.glob("model_*.weights.h5")):
+        model = DynamicsModel(dyn_input_dim, dyn_output_dim)
+        _ = model(tf.zeros((1, dyn_input_dim)))
+        model.load_weights(weight_file)
+        dyn_models.append(model)
+    if not dyn_models:
+        raise FileNotFoundError(f"No dynamics models found in {dynamics_dir}")
+
+    policy = PolicyNet(test_states.shape[1])
+    value_net = ValueNet(test_states.shape[1])
+    _ = policy(test_states[:1])
+    _ = value_net(test_states[:1])
+    policy.load_weights(hybrid_dir / "ppo_policy.weights.h5")
+    value_net.load_weights(hybrid_dir / "ppo_value.weights.h5")
+
+    q_mb = compute_q_mb(dyn_models, value_net, test_states, gamma=gamma)
+    q_mb = np.nan_to_num(q_mb, nan=0.0, posinf=0.0, neginf=0.0)
+    q_mb = np.minimum(q_mb, q_cql + delta)
+
+    gating = json.loads((hybrid_dir / "gating.json").read_text())
+    traj_lengths = compute_traj_lengths(eval_df)
+    max_dist = max_neighbor_distance(test_states, train_states, neighbor_k)
+    gate_x = gate_features(eval_df, traj_lengths, max_dist)
+    gate_x = (gate_x - np.array(gating["mean"])) / np.array(gating["std"])
+
+    gate_logits = np.clip(gate_x @ np.array(gating["coef"]) + gating["intercept"], -60.0, 60.0)
+    gate_probs = 1.0 / (1.0 + np.exp(-gate_logits))
+    thresholded = np.where(gate_probs >= gating["threshold"], gate_probs, 0.0)
+    p_mb = np.clip(thresholded, 0.0, 1.0)
+
+    q_hyb = (1.0 - p_mb[:, None]) * q_cql + p_mb[:, None] * q_mb
+    q_hyb = np.nan_to_num(q_hyb, nan=0.0, posinf=0.0, neginf=0.0)
+
+    pi_cql = softmax_probs(q_cql, tau)
+    pi_mb = softmax_probs(q_mb, tau)
+    policy_probs = (1.0 - p_mb[:, None]) * pi_cql + p_mb[:, None] * pi_mb
+    policy_probs = stabilize_policy_probs(policy_probs, epsilon=ope_epsilon)
+
+    return {
+        "pi": policy_probs,
+        "q_values": q_hyb,
+        "extras": {
+            "p_mb": p_mb.astype(np.float32),
+            "q_cql": q_cql.astype(np.float32),
+            "q_mb": q_mb.astype(np.float32),
+            "q_hyb": q_hyb.astype(np.float32),
+            "physician_action": action_ids(eval_df).astype(np.int32),
+        },
+    }
+
+
 def run_policy(policy: str, cfg: Config, split: str, hparams_path: Optional[str]) -> Path:
     results_dir = ensure_results_dir(cfg)
     action_bins = load_action_bins_from_results(cfg)
@@ -145,14 +249,17 @@ def run_policy(policy: str, cfg: Config, split: str, hparams_path: Optional[str]
         train_actions = compute_action_ids(train_df, action_bins, cfg.columns)
         knn_k = int(params.get("knn_k", 300))
         pi = knn_policy_probs(train_states, train_actions, eval_states, knn_k)
+        q_values = np.zeros_like(pi)
+        extras: Optional[Dict[str, np.ndarray]] = None
+    elif policy == "hybrid":
+        hybrid = run_real_hybrid_eval(cfg, split)
+        pi = hybrid["pi"]
+        q_values = hybrid["q_values"]
+        extras = hybrid["extras"]
     else:
         pi = build_placeholder_pi(df, action_bins, cfg.columns)
-    q_values = np.zeros_like(pi)
-    extras: Dict[str, np.ndarray] = {}
-    if policy == "hybrid":
-        extras["p_mb"] = np.full(len(df), 0.5, dtype=np.float32)
-        extras["q_cql"] = np.zeros(len(df), dtype=np.float32)
-        extras["q_hyb"] = np.zeros(len(df), dtype=np.float32)
+        q_values = np.zeros_like(pi)
+        extras = None
 
     outputs = build_policy_outputs(
         df,
@@ -160,7 +267,7 @@ def run_policy(policy: str, cfg: Config, split: str, hparams_path: Optional[str]
         pi=pi,
         columns=cfg.columns,
         q_values=q_values,
-        extras=extras or None,
+        extras=extras,
     )
     out_path = results_dir / f"policy_outputs_{policy}_{split}.npz"
     outputs.to_npz(out_path)
